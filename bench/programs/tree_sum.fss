@@ -1,0 +1,8 @@
+type Tree = Leaf of int | Node of Tree * Tree
+
+let rec sum t = match t with Leaf n -> n | Node (l, r) -> sum l + sum r
+
+let rec build n = if n = 0 then Leaf 0 else Node (build (n - 1), Leaf n)
+
+let main () =
+    print_int (sum (build 1000)); print_newline ()

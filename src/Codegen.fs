@@ -1,0 +1,1126 @@
+module Fss.Codegen
+
+open Fss.Ast
+open Fss.Typer
+open System.Text
+
+type private ScopeEntry = { CName: string; Ty: Ty; Mutable: bool }
+
+let emit (prog: Fss.Mono.Program) : string =
+    let typedefBuf = ResizeArray<string>()
+    let eqBuf = ResizeArray<string>()
+    let eqFwdBuf = ResizeArray<string>()
+    let thunkBuf = ResizeArray<string>()
+    let typedefSet = System.Collections.Generic.HashSet<string>()
+    let eqSet = System.Collections.Generic.HashSet<string>()
+
+    let mutable out = StringBuilder()
+    let mutable tmp = 0
+    let mutable nameCounter = 0
+    let mutable lambdaCounter = 0
+    let mutable level = 0
+    let mutable scope : Map<string, ScopeEntry> = Map.empty
+
+    let freshTemp () =
+        tmp <- tmp + 1
+        "__t" + string tmp
+
+    let freshName (baseName: string) =
+        nameCounter <- nameCounter + 1
+        "v_" + baseName + "_" + string nameCounter
+
+    let freshLambda () =
+        lambdaCounter <- lambdaCounter + 1
+        lambdaCounter
+
+    let fieldN (i: int) = "a" + string i
+    let efieldN (i: int) = "e->a" + string i
+    let paramN (i: int) = "p" + string i
+    let envT (id: int) = "env_" + string id
+    let thunkT (id: int) = "thunk_" + string id
+
+    // Escape a source string for embedding in a C string literal.
+    let cEscape (s: string) : string =
+        let sb = StringBuilder()
+        for ch in s do
+            match ch with
+            | '\\' -> sb.Append("\\\\") |> ignore
+            | '"' -> sb.Append("\\\"") |> ignore
+            | '\n' -> sb.Append("\\n") |> ignore
+            | '\t' -> sb.Append("\\t") |> ignore
+            | '\r' -> sb.Append("\\r") |> ignore
+            | _ -> sb.Append(ch) |> ignore
+        sb.ToString()
+
+    let ind () = String.replicate (level * 4) " "
+
+    let line (s: string) =
+        out.Append(ind()).AppendLine(s) |> ignore
+
+    let isBuiltin (n: string) = List.contains n Ast.builtinNames
+
+    let rec foldFunTy (ps: Ty list) (r: Ty) : Ty =
+        match ps with
+        | [] -> r
+        | p :: rest -> FunTy(p, foldFunTy rest r)
+
+    let rec flattenFun (e: TExpr) : ((string * Ty) list * TExpr) =
+        match e with
+        | TFun (pn, FunTy (pt, _), body) ->
+            let (rest, finalBody) =
+                match body with
+                | TFun _ -> flattenFun body
+                | _ -> ([], body)
+            ((pn, pt) :: rest), finalBody
+        | _ -> ([], e)
+
+    let topFunList, topValueList =
+        prog.Consts
+        |> List.fold
+            (fun (funs, vals) (n, t, e, mf) ->
+                match Typer.resolveTy t, e with
+                | FunTy _, TFun _ ->
+                    let (paramInfos, body) = flattenFun e
+                    let ps = paramInfos |> List.map snd
+                    let r = Typer.resolveTy (tyOf body)
+                    ((n, ps, r, e) :: funs, vals)
+                | _ -> (funs, (n, t, e, mf) :: vals))
+            ([], [])
+        |> fun (funs, vals) -> (List.rev funs, List.rev vals)
+
+    let topFuns =
+        topFunList |> List.map (fun (n, ps, r, _) -> n, (ps, r)) |> Map.ofList
+
+    for (n, t, _, mf) in topValueList do
+        scope <- Map.add n { CName = "v_" + n; Ty = t; Mutable = mf } scope
+
+    let tagIndexOf (case: string) : int =
+        match Map.tryFind case prog.Ctors with
+        | Some (tname, _) ->
+            match Map.tryFind tname prog.Types with
+            | Some (UnionDef cases) ->
+                match cases |> List.tryFindIndex (fun (c, _) -> c = case) with
+                | Some i -> i
+                | None -> failwith ("tagIndexOf: case not found " + case)
+            | _ -> failwith ("tagIndexOf: not a union " + tname)
+        | None -> failwith ("tagIndexOf: unknown case " + case)
+
+    // --- C type mapping -----------------------------------------------------
+
+    let rec typeName (t: Ty) : string =
+        match Typer.resolveTy t with
+        | IntTy -> "int32_t"
+        | BoolTy -> "bool"
+        | UnitTy -> "int32_t"
+        | StringTy -> "fsstring_t"
+        | FunTy _ -> closureName (Typer.resolveTy t)
+        | TNamed ("list", [ e ]) -> listName e
+        | TNamed ("option", [ e ]) -> optionName e
+        | TNamed (n, []) ->
+            registerNamed n
+            "fs_" + n
+        | TNamed (n, _) ->
+            registerNamed n
+            "fs_" + n
+        | TupleTy ts -> tupleName ts
+        | TyVar _ -> "int32_t"
+
+    and listName (e: Ty) : string =
+        let en = typeName e
+        let name = "fslist_" + en
+        if typedefSet.Add name then
+            typedefBuf.Add(sprintf "typedef struct %s { %s head; struct %s* tail; } %s;" name (ctypeArg e) name name)
+        name
+
+    and optionName (e: Ty) : string =
+        let en = typeName e
+        let name = "fsoption_" + en
+        if typedefSet.Add name then
+            typedefBuf.Add(sprintf "typedef struct { int32_t tag; %s value; } %s;" (ctypeArg e) name)
+        name
+
+    and tupleName (ts: Ty list) : string =
+        let tns = List.map typeName ts
+        let name = "tuple_" + String.concat "_" tns
+        if typedefSet.Add name then
+            let fields = ts |> List.mapi (fun i t -> ctypeArg t + " a" + string i + ";") |> String.concat " "
+            typedefBuf.Add(sprintf "typedef struct { %s } %s;" fields name)
+        name
+
+    and registerNamed (n: string) : unit =
+        if typedefSet.Add("fs_" + n) then
+            match Map.tryFind n prog.Types with
+            | Some (RecordDef fields) ->
+                let fs =
+                    fields
+                    |> List.map (fun (f, ft) -> sprintf "%s f_%s;" (ctypeArg ft) f)
+                    |> String.concat " "
+                typedefBuf.Add(sprintf "typedef struct fs_%s { %s } fs_%s;" n fs n)
+            | Some (UnionDef cases) ->
+                let members =
+                    cases
+                    |> List.map (fun (c, payload) ->
+                        match Typer.resolveTy payload with
+                        | UnitTy -> sprintf "int32_t u_%s;" c
+                        | pt -> sprintf "%s u_%s;" (ctypeArg pt) c)
+                    |> String.concat " "
+                typedefBuf.Add(sprintf "typedef struct fs_%s { int32_t tag; union { %s } u; } fs_%s;" n members n)
+            | None -> ()
+
+    and closureName (ft: Ty) : string =
+        match Typer.resolveTy ft with
+        | FunTy (a, r) ->
+            let sa = ctypeArg a |> fun s -> s.Replace("*", "_ptr")
+            let sr = ctypeRet r |> fun s -> s.Replace("*", "_ptr")
+            let name = "closure_" + sa + "_" + sr
+            if typedefSet.Add name then
+                let fn = "fn_" + sa + "_" + sr
+                typedefBuf.Add(sprintf "typedef %s (*%s)(void* env, %s);" (ctypeRet r) fn (ctypeArg a))
+                typedefBuf.Add(sprintf "typedef struct { %s fn; void* env; } %s;" fn name)
+            name
+        | _ -> failwith "closureName: not a function type"
+
+    and ctypeArg (t: Ty) : string =
+        match Typer.resolveTy t with
+        | TNamed ("list", [ e ]) -> listName e + "*"
+        | TNamed ("option", [ e ]) -> optionName e
+        | TNamed (n, _) ->
+            registerNamed n
+            "fs_" + n + "*"
+        | _ -> typeName t
+
+    and ctypeRet (t: Ty) : string =
+        match Typer.resolveTy t with
+        | UnitTy -> "void"
+        | _ -> ctypeArg t
+
+    // --- Structural equality -------------------------------------------------
+
+    and eqCall (t: Ty) (a: string) (b: string) : string =
+        match Typer.resolveTy t with
+        | IntTy | BoolTy | UnitTy -> a + " == " + b
+        | StringTy -> "fs_str_eq(" + a + ", " + b + ")"
+        | FunTy _ -> failwith "cannot compare functions"
+        | _ -> eqName t + "(" + a + ", " + b + ")"
+
+    and eqName (t: Ty) : string =
+        match Typer.resolveTy t with
+        | TNamed ("list", [ e ]) -> eqList e
+        | TNamed ("option", [ e ]) -> eqOption e
+        | TNamed (n, []) -> eqNamed n
+        | TupleTy ts -> eqTuple ts
+        | _ -> failwith "eqName on non-data type"
+
+    and eqList (e: Ty) : string =
+        let ln = listName e
+        let name = "eq_" + ln
+        if eqSet.Add name then
+            eqFwdBuf.Add(sprintf "static bool %s(%s* a, %s* b);" name ln ln)
+            let ee = eqCall e "a->head" "b->head"
+            eqBuf.Add(sprintf "static bool %s(%s* a, %s* b) { if (a == NULL || b == NULL) return a == b; return %s && %s(a->tail, b->tail); }" name ln ln ee name)
+        name
+
+    and eqOption (e: Ty) : string =
+        let on = optionName e
+        let name = "eq_" + on
+        if eqSet.Add name then
+            eqFwdBuf.Add(sprintf "static bool %s(%s a, %s b);" name on on)
+            let ee = eqCall e "a.value" "b.value"
+            eqBuf.Add(sprintf "static bool %s(%s a, %s b) { if (a.tag != b.tag) return false; if (a.tag == 0) return true; return %s; }" name on on ee)
+        name
+
+    and eqNamed (n: string) : string =
+        typeName (TNamed(n, [])) |> ignore // ensure the struct typedef exists
+        let name = "eq_fs_" + n
+        if eqSet.Add name then
+            eqFwdBuf.Add(sprintf "static bool %s(fs_%s* a, fs_%s* b);" name n n)
+            match Map.tryFind n prog.Types with
+            | Some (RecordDef fields) ->
+                let conds =
+                    fields
+                    |> List.map (fun (f, ft) -> eqCall ft ("a->f_" + f) ("b->f_" + f))
+                    |> String.concat " && "
+                let body = if conds = "" then "return true;" else "return " + conds + ";"
+                eqBuf.Add(sprintf "static bool %s(fs_%s* a, fs_%s* b) { %s }" name n n body)
+            | Some (UnionDef cases) ->
+                let arms =
+                    cases
+                    |> List.mapi (fun i (c, payload) ->
+                        match Typer.resolveTy payload with
+                        | UnitTy -> "if (a->tag == " + string i + ") return true;"
+                        | pt -> "if (a->tag == " + string i + ") return " + eqCall pt ("a->u.u_" + c) ("b->u.u_" + c) + ";")
+                    |> String.concat " "
+                eqBuf.Add(sprintf "static bool %s(fs_%s* a, fs_%s* b) { if (a->tag != b->tag) return false; %s return true; }" name n n arms)
+            | None -> ()
+        name
+
+    and eqTuple (ts: Ty list) : string =
+        let tn = tupleName ts
+        let name = "eq_" + tn
+        if eqSet.Add name then
+            eqFwdBuf.Add(sprintf "static bool %s(%s a, %s b);" name tn tn)
+            let conds =
+                ts |> List.mapi (fun i t -> eqCall t ("a.a" + string i) ("b.a" + string i)) |> String.concat " && "
+            eqBuf.Add(sprintf "static bool %s(%s a, %s b) { return %s; }" name tn tn conds)
+        name
+
+    // --- Scope / names ------------------------------------------------------
+
+    let resolve (n: string) : string =
+        match Map.tryFind n scope with
+        | Some e -> e.CName
+        | None ->
+            if Map.containsKey n topFuns then failwith ("function '" + n + "' cannot be used as a value in v0.1")
+            elif Map.containsKey n prog.Ctors then failwith ("constructor '" + n + "' cannot be used as a value")
+            elif isBuiltin n then failwith ("builtin '" + n + "' cannot be used as a value")
+            else failwith ("unbound name '" + n + "'")
+
+    let withScope (adds: (string * ScopeEntry) list) (f: unit -> 'a) : 'a =
+        let saved = scope
+        for (n, e) in adds do
+            scope <- Map.add n e scope
+        let r = f ()
+        scope <- saved
+        r
+
+    let rec freeVars (e: TExpr) : Set<string> =
+        match e with
+        | TVar (n, _) -> Set.singleton n
+        | TInt _ | TBool _ | TUnit | TStr _ | TNil _ | TNone _ -> Set.empty
+        | TUnary (_, _, x) -> freeVars x
+        | TBinary (_, _, a, b) -> Set.union (freeVars a) (freeVars b)
+        | TIf (_, c, t, e) -> Set.unionMany [ freeVars c; freeVars t; freeVars e ]
+        | TLet (n, _, v, b) -> Set.union (freeVars v) (Set.remove n (freeVars b))
+        | TLetRec (n, _, v, b) -> Set.union (Set.remove n (freeVars v)) (Set.remove n (freeVars b))
+        | TLetMutable (n, _, v, b) -> Set.union (freeVars v) (Set.remove n (freeVars b))
+        | TAssign (n, e) -> Set.add n (freeVars e)
+        | TWhile (c, b) -> Set.union (freeVars c) (freeVars b)
+        | TSeq (_, xs) -> Set.unionMany (List.map freeVars xs)
+        | TFun (p, _, body) -> Set.remove p (freeVars body)
+        | TApply (_, f, a) -> Set.union (freeVars f) (freeVars a)
+        | TTuple (_, xs) -> Set.unionMany (List.map freeVars xs)
+        | TRecord (_, fields, baseE) ->
+            let fv = fields |> List.map (fun (_, v) -> freeVars v) |> Set.unionMany
+            match baseE with Some b -> Set.union fv (freeVars b) | None -> fv
+        | TField (_, e, _) -> freeVars e
+        | TCons (_, h, t) -> Set.union (freeVars h) (freeVars t)
+        | TSome (_, x) -> freeVars x
+        | TMatch (_, scrut, arms) ->
+            let armVars =
+                arms
+                |> List.map (fun (p, b) ->
+                    let bound = patternVars p
+                    Set.difference (freeVars b) bound)
+                |> Set.unionMany
+            Set.union (freeVars scrut) armVars
+        | TFailwith (_, x) -> freeVars x
+        | TTry (_, body, arms) ->
+            let armVars =
+                arms
+                |> List.map (fun (p, b) ->
+                    let bound = patternVars p
+                    Set.difference (freeVars b) bound)
+                |> Set.unionMany
+            Set.union (freeVars body) armVars
+
+    and patternVars (p: TPattern) : Set<string> =
+        match p with
+        | TPVar (n, _) -> Set.singleton n
+        | TPTuple ps -> Set.unionMany (List.map patternVars ps)
+        | TPCons (h, t) -> Set.union (patternVars h) (patternVars t)
+        | TPUnion (_, Some p, _) -> patternVars p
+        | _ -> Set.empty
+
+    let rec isPure (e: TExpr) : bool =
+        match e with
+        | TInt _ | TBool _ | TUnit | TStr _ | TVar _ | TNil _ | TNone _ -> true
+        | TUnary (_, _, x) -> isPure x
+        | TBinary (_, _, a, b) -> isPure a && isPure b
+        | TIf (_, c, t, e) -> isPure c && isPure t && isPure e
+        | _ -> false
+
+    let rec collectApp (e: TExpr) (acc: TExpr list) : (TExpr * TExpr list) =
+        match e with
+        | TApply (_, f, a) -> collectApp f (a :: acc)
+        | _ -> (e, acc)
+
+    let rec patternTest (p: TPattern) (target: string) : (string * (string * ScopeEntry) list) =
+        match p with
+        | TPWildcard -> ("true", [])
+        | TPVar (n, ty) -> ("true", [ (n, { CName = target; Ty = ty; Mutable = false }) ])
+        | TPInt k -> (target + " == " + string k, [])
+        | TPBool b -> (target + " == " + (if b then "true" else "false"), [])
+        | TPUnit -> ("true", [])
+        | TPTuple ps ->
+            let rec go i ps accConds accBinds =
+                match ps with
+                | [] -> (accConds, accBinds)
+                | p :: rest ->
+                    let (c, b) = patternTest p (target + ".a" + string i)
+                    go (i + 1) rest (accConds @ [ c ]) (accBinds @ b)
+            let (conds, binds) = go 0 ps [] []
+            (String.concat " && " conds, binds)
+        | TPNil -> (target + " == NULL", [])
+        | TPCons (h, t) ->
+            let (hc, hb) = patternTest h (target + "->head")
+            let (tc, tb) = patternTest t (target + "->tail")
+            (target + " != NULL && " + hc + " && " + tc, hb @ tb)
+        | TPUnion ("None", None, _) -> (target + ".tag == 0", [])
+        | TPUnion ("Some", Some p, _) ->
+            let (pc, pb) = patternTest p (target + ".value")
+            (target + ".tag == 1 && " + pc, pb)
+        | TPStr s ->
+            ("fs_str_eq(" + target + ", (fsstring_t){ .len = " + string s.Length + ", .data = (char*)\"" + cEscape s + "\" })", [])
+        | TPUnion (c, None, _) -> (target + "->tag == " + string (tagIndexOf c), [])
+        | TPUnion (c, Some p, payload) ->
+            let mbr = target + "->u.u_" + c
+            let (pc, pb) = patternTest p mbr
+            (target + "->tag == " + string (tagIndexOf c) + " && " + pc, pb)
+
+    // --- Code generation ----------------------------------------------------
+
+    let rec value (e: TExpr) : string =
+        match e with
+        | TInt n -> string n
+        | TBool b -> if b then "true" else "false"
+        | TUnit -> "0"
+        | TStr s -> "(fsstring_t){ .len = " + string s.Length + ", .data = (char*)\"" + cEscape s + "\" }"
+        | TVar (n, _) ->
+            match Map.tryFind n prog.Ctors with
+            | Some (tname, payload) when Typer.resolveTy payload = UnitTy ->
+                let tn = typeName (TNamed(tname, []))
+                let tv = freshTemp ()
+                "({ " + tn + "* " + tv + " = (" + tn + "*)fs_alloc(sizeof(" + tn + ")); " + tv + "->tag = " + string (tagIndexOf n) + "; " + tv + "; })"
+            | _ -> resolve n
+        | TUnary (Neg, _, x) -> sprintf "(-(%s))" (value x)
+        | TUnary (Not, _, x) -> sprintf "(!(%s))" (value x)
+        | TBinary (Add, ty, a, b) when Typer.resolveTy ty = StringTy ->
+            "fs_str_concat(" + value a + ", " + value b + ")"
+        | TBinary (Eq, _, a, b) -> eqBin a b
+        | TBinary (Ne, _, a, b) -> "(!(" + eqBin a b + "))"
+        | TBinary (And, _, a, b) -> sprintf "(%s && %s)" (value a) (value b)
+        | TBinary (Or, _, a, b) -> sprintf "(%s || %s)" (value a) (value b)
+        | TBinary (op, _, a, b) ->
+            let s =
+                match op with
+                | Add -> "+" | Sub -> "-" | Mul -> "*" | Div -> "/" | Mod -> "%"
+                | Lt -> "<" | Le -> "<=" | Gt -> ">" | Ge -> ">="
+                | Eq -> "==" | Ne -> "!=" | And -> "&&" | Or -> "||"
+            sprintf "(%s %s %s)" (value a) s (value b)
+        | TIf (ty, c, t, e) ->
+            let rt = Typer.resolveTy ty
+            if rt = UnitTy then
+                sprintf "({ if (%s) { %s } else { %s } 0; })" (value c) (stmtFlat t) (stmtFlat e)
+            elif isPure t && isPure e then
+                sprintf "(%s ? %s : %s)" (value c) (value t) (value e)
+            else
+                let tn = freshTemp ()
+                sprintf "({ %s %s; if (%s) %s = %s; else %s = %s; %s; })"
+                    (ctypeArg rt) tn (value c) tn (value t) tn (value e) tn
+        | TLet (n, ty, bound, body) -> valueLet n ty bound body false
+        | TLetRec (n, ty, bound, body) -> valueLet n ty bound body false
+        | TLetMutable (n, ty, bound, body) -> valueLet n ty bound body true
+        | TAssign (n, e) -> sprintf "({ %s = %s; 0; })" (resolve n) (value e)
+        | TWhile (c, body) -> sprintf "({ while (%s) { %s } 0; })" (value c) (stmtFlat body)
+        | TSeq (_, items) ->
+            let body =
+                match List.rev items with
+                | [] -> "0;"
+                | last :: rest ->
+                    let stmts = rest |> List.rev |> List.map stmtFlat |> String.concat " "
+                    stmts + " " + value last + ";"
+            sprintf "({ %s })" body
+        | TFun (param, ft, body) ->
+            match Typer.resolveTy ft with
+            | FunTy (pt, rt) -> emitLambda param pt rt body
+            | _ -> failwith "bad function type"
+        | TTuple (ty, items) ->
+            let ts = match Typer.resolveTy ty with TupleTy ts -> ts | _ -> []
+            "(" + tupleName ts + "){ " + (items |> List.map value |> String.concat ", ") + " }"
+        | TRecord (ty, fields, None) ->
+            let n = match Typer.resolveTy ty with TNamed (n, []) -> n | _ -> failwith "record type"
+            let tn = typeName (TNamed(n, []))
+            let tv = freshTemp ()
+            let inits =
+                fields |> List.map (fun (f, v) -> tv + "->f_" + f + " = " + value v) |> String.concat "; "
+            "({ " + tn + "* " + tv + " = (" + tn + "*)fs_alloc(sizeof(" + tn + ")); " + inits + "; " + tv + "; })"
+        | TRecord (ty, fields, Some baseE) ->
+            let n = match Typer.resolveTy ty with TNamed (n, []) -> n | _ -> failwith "record type"
+            let tn = typeName (TNamed(n, []))
+            let bv = freshTemp ()
+            let tv = freshTemp ()
+            let sets =
+                fields |> List.map (fun (f, v) -> tv + "->f_" + f + " = " + value v) |> String.concat "; "
+            "({ " + tn + "* " + bv + " = " + value baseE + "; " + tn + "* " + tv + " = (" + tn + "*)fs_alloc(sizeof(" + tn + ")); *" + tv + " = *" + bv + "; " + sets + "; " + tv + "; })"
+        | TField (_, recv, f) -> "(" + value recv + ")->f_" + f
+        | TNil _ -> "NULL"
+        | TCons (ty, h, t) ->
+            let eTy = match Typer.resolveTy ty with TNamed ("list", [ e ]) -> e | _ -> failwith "cons type"
+            let ln = listName eTy
+            let nn = freshTemp ()
+            "({ " + ln + "* " + nn + " = fs_alloc(sizeof(" + ln + ")); " + nn + "->head = " + value h + "; " + nn + "->tail = " + value t + "; " + nn + "; })"
+        | TNone ty ->
+            let eTy = match Typer.resolveTy ty with TNamed ("option", [ e ]) -> e | _ -> failwith "option type"
+            "(" + optionName eTy + "){0}"
+        | TSome (ty, x) ->
+            let eTy = match Typer.resolveTy ty with TNamed ("option", [ e ]) -> e | _ -> failwith "option type"
+            "(" + optionName eTy + "){ .tag = 1, .value = " + value x + " }"
+        | TMatch (ty, scrut, arms) ->
+            let rt = Typer.resolveTy ty
+            let st = Typer.resolveTy (tyOf scrut)
+            let sn = freshTemp ()
+            let rn = if rt = UnitTy then None else Some(freshTemp ())
+            let decls =
+                ctypeArg st + " " + sn + " = " + value scrut + ";"
+                + (match rn with Some r -> " " + ctypeArg rt + " " + r + ";" | None -> "")
+            let body = matchFlat sn rn arms
+            let final = match rn with Some r -> r | None -> "0"
+            sprintf "({ %s %s %s; })" decls body final
+        | TFailwith (ty, msg) ->
+            "({ fs_raise(" + value msg + "); (" + ctypeArg (Typer.resolveTy ty) + "){0}; })"
+        | TTry (ty, body, arms) ->
+            let rt = Typer.resolveTy ty
+            let h = freshTemp ()
+            let setup = "fs_handler_t " + h + "; " + h + ".prev = fs_handler_top; fs_handler_top = &" + h + ";"
+            if rt = UnitTy then
+                "({ " + setup + " " + tryFlat h body arms None + " 0; })"
+            else
+                let rn = freshTemp ()
+                "({ " + setup + " " + ctypeArg rt + " " + rn + "; " + tryFlat h body arms (Some rn) + " " + rn + "; })"
+        | TApply _ ->
+            let (f, args) = collectApp e []
+            match f with
+            | TVar (name, _) when Map.containsKey name prog.Ctors -> valueCtor name args
+            | TVar (name, _) when isBuiltin name -> valueBuiltin name args
+            | TVar (name, _) when Map.containsKey name topFuns -> valueTopCall name args (Typer.resolveTy (tyOf e))
+            | _ -> valueClosureApply e
+
+    and valueLet (n: string) (ty: Ty) (bound: TExpr) (body: TExpr) (mutableFlag: bool) : string =
+        let bv = value bound
+        let cn = freshName n
+        let old = Map.tryFind n scope
+        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag } scope
+        let bodyV = value body
+        scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
+        sprintf "({ %s %s = %s; %s; })" (ctypeArg ty) cn bv bodyV
+
+    and stmtFlat (e: TExpr) : string =
+        match e with
+        | TSeq (_, items) -> items |> List.map stmtFlat |> String.concat " "
+        | TLet (n, ty, bound, body) -> stmtLet n ty bound body false
+        | TLetRec (n, ty, bound, body) -> stmtLet n ty bound body false
+        | TLetMutable (n, ty, bound, body) -> stmtLet n ty bound body true
+        | TAssign (n, e) -> sprintf "%s = %s;" (resolve n) (value e)
+        | TWhile (c, body) -> sprintf "while (%s) { %s }" (value c) (stmtFlat body)
+        | TIf (_, c, t, e) -> sprintf "if (%s) { %s } else { %s }" (value c) (stmtFlat t) (stmtFlat e)
+        | TMatch (_, scrut, arms) ->
+            let st = Typer.resolveTy (tyOf scrut)
+            let sn = freshTemp ()
+            sprintf "{ %s %s = %s; %s }" (ctypeArg st) sn (value scrut) (matchFlat sn None arms)
+        | TFailwith (_, msg) -> "fs_raise(" + value msg + ");"
+        | TTry (_, body, arms) ->
+            let h = freshTemp ()
+            sprintf "{ fs_handler_t %s; %s.prev = fs_handler_top; fs_handler_top = &%s; %s }" h h h (tryFlat h body arms None)
+        | TApply _ ->
+            let (f, args) = collectApp e []
+            match f with
+            | TVar (name, _) when isBuiltin name -> builtinStmt name args
+            | TVar (name, _) when Map.containsKey name topFuns ->
+                let (ptys, _) = topFuns.[name]
+                if List.length args = List.length ptys then
+                    "v_" + name + "(" + (args |> List.map value |> String.concat ", ") + ");"
+                else
+                    value e + ";"
+            | _ -> value e + ";"
+        | _ -> value e + ";"
+
+    and stmtLet (n: string) (ty: Ty) (bound: TExpr) (body: TExpr) (mutableFlag: bool) : string =
+        let bv = value bound
+        let cn = freshName n
+        let old = Map.tryFind n scope
+        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag } scope
+        let bodyS = stmtFlat body
+        scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
+        sprintf "{ %s %s = %s; %s }" (ctypeArg ty) cn bv bodyS
+
+    and eqBin (a: TExpr) (b: TExpr) : string =
+        let t = Typer.resolveTy (tyOf a)
+        match t with
+        | IntTy | BoolTy | UnitTy -> "(" + value a + ") == (" + value b + ")"
+        | _ -> eqCall t (value a) (value b)
+
+    and valueBuiltin (name: string) (args: TExpr list) : string =
+        match name, args with
+        | "print_int", [ a ] -> sprintf "({ print_int(%s); 0; })" (value a)
+        | "print_bool", [ a ] -> sprintf "({ print_bool(%s); 0; })" (value a)
+        | "print_newline", [ _ ] -> "({ print_newline(); 0; })"
+        | "print_string", [ a ] -> "({ print_string(" + value a + "); 0; })"
+        | "str_len", [ a ] -> "(" + value a + ").len"
+        | "int_to_string", [ a ] -> "int_to_string(" + value a + ")"
+        | "bool_to_string", [ a ] -> "bool_to_string(" + value a + ")"
+        | "read_line", [ _ ] -> "read_line()"
+        | "read_file", [ a ] -> "read_file(" + value a + ")"
+        | "write_file", [ a; b ] -> "({ write_file(" + value a + ", " + value b + "); 0; })"
+        | "str_get", [ a; b ] -> "str_get(" + value a + ", " + value b + ")"
+        | "str_sub", [ a; b; c ] -> "str_sub(" + value a + ", " + value b + ", " + value c + ")"
+        | "int_of_string", [ a ] -> "int_of_string(" + value a + ")"
+        | _ -> failwith ("bad builtin call: " + name)
+
+    and builtinStmt (name: string) (args: TExpr list) : string =
+        match name, args with
+        | "print_int", [ a ] -> "print_int(" + value a + ");"
+        | "print_bool", [ a ] -> "print_bool(" + value a + ");"
+        | "print_newline", [ _ ] -> "print_newline();"
+        | "print_string", [ a ] -> "print_string(" + value a + ");"
+        | "str_len", [ a ] -> "(void)(" + value a + ".len);"
+        | "int_to_string", [ a ] -> "(void)int_to_string(" + value a + ");"
+        | "bool_to_string", [ a ] -> "(void)bool_to_string(" + value a + ");"
+        | "read_line", [ _ ] -> "(void)read_line();"
+        | "read_file", [ a ] -> "(void)read_file(" + value a + ");"
+        | "write_file", [ a; b ] -> "write_file(" + value a + ", " + value b + ");"
+        | "str_get", [ a; b ] -> "(void)str_get(" + value a + ", " + value b + ");"
+        | "str_sub", [ a; b; c ] -> "(void)str_sub(" + value a + ", " + value b + ", " + value c + ");"
+        | "int_of_string", [ a ] -> "(void)int_of_string(" + value a + ");"
+        | _ -> failwith ("bad builtin call: " + name)
+
+    and valueCtor (name: string) (args: TExpr list) : string =
+        let (tname, payload) = prog.Ctors.[name]
+        let tag = tagIndexOf name
+        let tn = typeName (TNamed(tname, []))
+        let tv = freshTemp ()
+        match Typer.resolveTy payload with
+        | UnitTy ->
+            "({ " + tn + "* " + tv + " = (" + tn + "*)fs_alloc(sizeof(" + tn + ")); " + tv + "->tag = " + string tag + "; " + tv + "; })"
+        | _ ->
+            let argStr = match args with [ a ] -> value a | _ -> failwith ("constructor arity: " + name)
+            "({ " + tn + "* " + tv + " = (" + tn + "*)fs_alloc(sizeof(" + tn + ")); " + tv + "->tag = " + string tag + "; " + tv + "->u.u_" + name + " = " + argStr + "; " + tv + "; })"
+
+    and valueTopCall (name: string) (args: TExpr list) (resultTy: Ty) : string =
+        let (ptys, rt) = topFuns.[name]
+        let cname = "v_" + name
+        let argStrs = args |> List.map value
+        let n = List.length ptys
+        if List.length args = n then
+            let call = cname + "(" + String.concat ", " argStrs + ")"
+            if Typer.resolveTy resultTy = UnitTy then "({ " + call + "; 0; })"
+            else call
+        elif List.length args < n then
+            let k = List.length args
+            buildPartial cname argStrs (List.take k ptys) (List.skip k ptys) rt
+        else
+            let directVal = cname + "(" + String.concat ", " (List.take n argStrs) + ")"
+            applyClosureChain directVal rt (List.skip n argStrs)
+
+    and applyClosureChain (cur: string) (ft: Ty) (args: string list) : string =
+        match args, Typer.resolveTy ft with
+        | [], _ -> cur
+        | a :: rest, FunTy (pt, rt) ->
+            let cl = closureName (FunTy(pt, rt))
+            let cn = freshTemp ()
+            let next =
+                if Typer.resolveTy rt = UnitTy then
+                    sprintf "({ %s %s = %s; %s.fn(%s.env, %s); 0; })" cl cn cur cn cn a
+                else
+                    sprintf "({ %s %s = %s; %s.fn(%s.env, %s); })" cl cn cur cn cn a
+            applyClosureChain next rt rest
+        | _ -> failwith "applyClosureChain: not a function"
+
+    and valueClosureApply (e: TExpr) : string =
+        match e with
+        | TApply (rt, f, a) ->
+            match Typer.resolveTy (tyOf f) with
+            | FunTy (pt, rrt) ->
+                let cl = closureName (FunTy(pt, rrt))
+                let cn = freshTemp ()
+                let fv = value f
+                let av = value a
+                if Typer.resolveTy rt = UnitTy then
+                    sprintf "({ %s %s = %s; %s.fn(%s.env, %s); 0; })" cl cn fv cn cn av
+                else
+                    sprintf "({ %s %s = %s; %s.fn(%s.env, %s); })" cl cn fv cn cn av
+            | _ -> failwith "valueClosureApply: not a function"
+        | _ -> failwith "valueClosureApply: not an apply"
+
+    and buildPartial (cname: string) (capArgs: string list) (capTys: Ty list) (remTys: Ty list) (rt: Ty) : string =
+        let id = freshLambda ()
+        let ev = "e" + string id
+        let evf i = ev + "->a" + string i
+        let fields =
+            capTys |> List.mapi (fun i t -> ctypeArg t + " " + fieldN i + ";") |> String.concat " "
+        typedefBuf.Add("typedef struct { " + fields + " } " + envT id + ";")
+
+        // A closure applies one argument at a time; when more than one
+        // parameter remains, applying one argument returns another closure.
+        let argC = ctypeArg (List.head remTys)
+        let retTy = if List.length remTys = 1 then rt else foldFunTy (List.tail remTys) rt
+        let retC = ctypeRet retTy
+        let thunkBody =
+            if List.length remTys = 1 then
+                let callArgs = [ for i in 0 .. capArgs.Length - 1 -> evf i ] @ [ "p" ]
+                "return " + cname + "(" + String.concat ", " callArgs + ");"
+            else
+                let newCapArgs = [ for i in 0 .. capArgs.Length - 1 -> evf i ] @ [ "p" ]
+                let newCapTys = capTys @ [ List.head remTys ]
+                "return " + buildPartial cname newCapArgs newCapTys (List.tail remTys) rt + ";"
+        thunkBuf.Add("static " + retC + " " + thunkT id + "(void* env, " + argC + " p) { " + envT id + "* " + ev + " = env; " + thunkBody + " }")
+
+        let closureTy = closureName (foldFunTy remTys rt)
+        let inits =
+            capArgs |> List.mapi (fun i a -> evf i + " = " + a + ";") |> String.concat " "
+        "({ " + envT id + "* " + ev + " = fs_alloc(sizeof(" + envT id + ")); " + inits + " (" + closureTy + "){ .fn = " + thunkT id + ", .env = " + ev + " }; })"
+
+    and emitLambda (param: string) (pt: Ty) (rt: Ty) (body: TExpr) : string =
+        let fv = Set.remove param (freeVars body)
+
+        let captured =
+            fv
+            |> Set.toList
+            |> List.choose (fun v ->
+                if Map.containsKey v topFuns || Map.containsKey v prog.Ctors || isBuiltin v then None
+                else
+                    match Map.tryFind v scope with
+                    | Some entry -> Some(v, entry)
+                    | None -> failwith ("unbound name '" + v + "' in lambda"))
+
+        let id = freshLambda ()
+        let ev = "e" + string id
+        let evf i = ev + "->a" + string i
+        let fields =
+            captured
+            |> List.mapi (fun i (_, entry) ->
+                let baseT = ctypeArg entry.Ty
+                if entry.Mutable then baseT + "* " + fieldN i + ";"
+                else baseT + " " + fieldN i + ";")
+            |> String.concat " "
+        typedefBuf.Add("typedef struct { " + fields + " } " + envT id + ";")
+
+        let retC = ctypeRet rt
+        let argC = ctypeArg pt
+
+        let thunkBody =
+            withScope
+                ((param, { CName = "p"; Ty = pt; Mutable = false })
+                 :: (captured
+                     |> List.mapi (fun i (v, entry) ->
+                         if entry.Mutable then (v, { CName = "(*" + evf i + ")"; Ty = entry.Ty; Mutable = true })
+                         else (v, { CName = evf i; Ty = entry.Ty; Mutable = false }))))
+                (fun () ->
+                    if retC = "void" then stmtFlat body
+                    else "return " + value body + ";")
+
+        thunkBuf.Add("static " + retC + " " + thunkT id + "(void* env, " + argC + " p) { " + envT id + "* " + ev + " = env; " + thunkBody + " }")
+
+        let closureTy = closureName (FunTy(pt, rt))
+        let inits =
+            captured
+            |> List.mapi (fun i (_, entry) ->
+                if entry.Mutable then evf i + " = &" + entry.CName + ";"
+                else evf i + " = " + entry.CName + ";")
+            |> String.concat " "
+
+        "({ " + envT id + "* " + ev + " = fs_alloc(sizeof(" + envT id + ")); " + inits + " (" + closureTy + "){ .fn = " + thunkT id + ", .env = " + ev + " }; })"
+
+    and matchFlat (sn: string) (rv: string option) (arms: (TPattern * TExpr) list) : string =
+        let rec go arms =
+            match arms with
+            | [] -> ""
+            | (p, body) :: rest ->
+                let (cond, binds) = patternTest p sn
+                let bodyStr =
+                    withScope binds (fun () ->
+                        match rv with
+                        | Some r -> r + " = " + value body + ";"
+                        | None -> stmtFlat body)
+                let restStr = go rest
+                if restStr = "" then sprintf "if (%s) { %s }" cond bodyStr
+                else sprintf "if (%s) { %s } else { %s }" cond bodyStr restStr
+        go arms
+
+    and tryFlat (h: string) (body: TExpr) (arms: (TPattern * TExpr) list) (rv: string option) : string =
+        let bodyStr =
+            match rv with
+            | Some r -> r + " = " + value body + ";"
+            | None -> stmtFlat body
+
+        let rec go arms =
+            match arms with
+            | [] -> "fs_raise(fs_exn_msg);"
+            | (p, hb) :: rest ->
+                let (cond, binds) = patternTest p "fs_exn_msg"
+                let hbStr =
+                    withScope binds (fun () ->
+                        match rv with
+                        | Some r -> r + " = " + value hb + ";"
+                        | None -> stmtFlat hb)
+                let restStr = go rest
+                "if (" + cond + ") { " + hbStr + " } else { " + restStr + " }"
+
+        "if (setjmp(" + h + ".buf) == 0) { " + bodyStr + " fs_handler_top = " + h + ".prev; } else { fs_handler_top = " + h + ".prev; " + go arms + " }"
+
+    // Pretty, indentation-aware statement emission.
+    let rec emitStmt (e: TExpr) : unit =
+        match e with
+        | TSeq (_, items) -> List.iter emitStmt items
+        | TLet (n, ty, bound, body) -> emitLet n ty bound body false
+        | TLetRec (n, ty, bound, body) -> emitLet n ty bound body false
+        | TLetMutable (n, ty, bound, body) -> emitLet n ty bound body true
+        | TAssign (n, e) -> line (sprintf "%s = %s;" (resolve n) (value e))
+        | TWhile (c, body) ->
+            line (sprintf "while (%s) {" (value c))
+            level <- level + 1
+            emitStmt body
+            level <- level - 1
+            line "}"
+        | TIf (_, c, t, e) ->
+            line (sprintf "if (%s) {" (value c))
+            level <- level + 1
+            emitStmt t
+            level <- level - 1
+            line "} else {"
+            level <- level + 1
+            emitStmt e
+            level <- level - 1
+            line "}"
+        | _ -> line (stmtFlat e)
+
+    and emitLet (n: string) (ty: Ty) (bound: TExpr) (body: TExpr) (mutableFlag: bool) : unit =
+        let bv = value bound
+        let cn = freshName n
+        let old = Map.tryFind n scope
+        line "{"
+        level <- level + 1
+        line (sprintf "%s %s = %s;" (ctypeArg ty) cn bv)
+        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag } scope
+        emitStmt body
+        scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
+        level <- level - 1
+        line "}"
+
+    // Emit a non-unit function body in tail position.
+    let rec emitTailReturn (e: TExpr) : unit =
+        match e with
+        | TIf (_, c, t, e) ->
+            line (sprintf "if (%s) {" (value c))
+            level <- level + 1
+            emitTailReturn t
+            level <- level - 1
+            line "} else {"
+            level <- level + 1
+            emitTailReturn e
+            level <- level - 1
+            line "}"
+        | TLet (n, ty, bound, body) -> emitTailLet n ty bound body false
+        | TLetMutable (n, ty, bound, body) -> emitTailLet n ty bound body true
+        | TSeq (_, items) ->
+            match List.rev items with
+            | [] -> line "return 0;"
+            | last :: rest ->
+                for s in List.rev rest do
+                    emitStmt s
+                emitTailReturn last
+        | _ -> line ("return " + value e + ";")
+
+    and emitTailLet (n: string) (ty: Ty) (bound: TExpr) (body: TExpr) (mutableFlag: bool) : unit =
+        let bv = value bound
+        let cn = freshName n
+        let old = Map.tryFind n scope
+        line (sprintf "%s %s = %s;" (ctypeArg ty) cn bv)
+        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag } scope
+        emitTailReturn body
+        scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
+
+    // --- Assemble -----------------------------------------------------------
+
+    let preamble =
+        "#include <stdint.h>\n" +
+        "#include <stdbool.h>\n" +
+        "#include <stdio.h>\n" +
+        "#include <stdlib.h>\n" +
+        "#include <string.h>\n" +
+        "#include <setjmp.h>\n" +
+        "\n" +
+        "typedef struct { int32_t len; char* data; } fsstring_t;\n" +
+        "\n" +
+        "static void print_int(int32_t x) { printf(\"%d\", x); }\n" +
+        "static void print_bool(bool b) { fputs(b ? \"true\" : \"false\", stdout); }\n" +
+        "static void print_newline(void) { fputc('\\n', stdout); }\n" +
+        "static void print_string(fsstring_t s) { fwrite(s.data, 1, (size_t)s.len, stdout); fflush(stdout); }\n" +
+        "\n" +
+        "// --- conservative mark-sweep garbage collector ---\n" +
+        "typedef struct fs_block { struct fs_block* next; size_t size; uint8_t mark; } fs_block_t;\n" +
+        "static fs_block_t* fs_heap = NULL;\n" +
+        "static size_t fs_live = 0;\n" +
+        "static struct { void* addr; size_t size; } fs_roots[1024];\n" +
+        "static int fs_root_count = 0;\n" +
+        "static void* fs_stack_bottom = NULL;\n" +
+        "static fs_block_t* fs_work[65536];\n" +
+        "static int fs_work_n = 0;\n" +
+        "static const size_t fs_threshold = 16 * 1024 * 1024;\n" +
+        "\n" +
+        "static void fs_gc_init(void* anchor) { fs_stack_bottom = anchor; }\n" +
+        "static void fs_add_root(void* var_addr, size_t size) {\n" +
+        "    if (fs_root_count < 1024) { fs_roots[fs_root_count].addr = var_addr; fs_roots[fs_root_count].size = size; fs_root_count++; }\n" +
+        "}\n" +
+        "\n" +
+        "static fs_block_t** fs_sorted = NULL;\n" +
+        "static int fs_sorted_n = 0;\n" +
+        "\n" +
+        "static int fs_block_cmp(const void* a, const void* b) {\n" +
+        "    fs_block_t* x = *(fs_block_t**)a;\n" +
+        "    fs_block_t* y = *(fs_block_t**)b;\n" +
+        "    return (char*)x < (char*)y ? -1 : ((char*)x > (char*)y ? 1 : 0);\n" +
+        "}\n" +
+        "\n" +
+        "static void fs_build_index(void) {\n" +
+        "    int n = 0;\n" +
+        "    for (fs_block_t* b = fs_heap; b; b = b->next) n++;\n" +
+        "    fs_sorted = (fs_block_t**)realloc(fs_sorted, sizeof(fs_block_t*) * (size_t)n);\n" +
+        "    int i = 0;\n" +
+        "    for (fs_block_t* b = fs_heap; b; b = b->next) fs_sorted[i++] = b;\n" +
+        "    qsort(fs_sorted, (size_t)n, sizeof(fs_block_t*), fs_block_cmp);\n" +
+        "    fs_sorted_n = n;\n" +
+        "}\n" +
+        "\n" +
+        "static fs_block_t* fs_find_block(void* p) {\n" +
+        "    int lo = 0, hi = fs_sorted_n - 1;\n" +
+        "    while (lo <= hi) {\n" +
+        "        int mid = lo + (hi - lo) / 2;\n" +
+        "        char* start = (char*)(fs_sorted[mid] + 1);\n" +
+        "        if ((char*)p < start) hi = mid - 1;\n" +
+        "        else if ((char*)p >= start + fs_sorted[mid]->size) lo = mid + 1;\n" +
+        "        else return fs_sorted[mid];\n" +
+        "    }\n" +
+        "    return NULL;\n" +
+        "}\n" +
+        "\n" +
+        "static void fs_mark_ptr(void* p) {\n" +
+        "    if (p == NULL) return;\n" +
+        "    fs_block_t* b = fs_find_block(p);\n" +
+        "    if (b != NULL && !b->mark) { b->mark = 1; fs_work[fs_work_n++] = b; }\n" +
+        "}\n" +
+        "\n" +
+        "static void fs_scan_block(fs_block_t* b) {\n" +
+        "    char* start = (char*)(b + 1);\n" +
+        "    for (char* q = start; q + sizeof(void*) <= start + b->size; q += sizeof(void*)) {\n" +
+        "        void* candidate;\n" +
+        "        memcpy(&candidate, q, sizeof(void*));\n" +
+        "        fs_mark_ptr(candidate);\n" +
+        "    }\n" +
+        "}\n" +
+        "\n" +
+        "static void fs_gc(void) {\n" +
+        "    __builtin_unwind_init();\n" +
+        "    fs_build_index();\n" +
+        "    fs_work_n = 0;\n" +
+        "    for (int i = 0; i < fs_root_count; i++) {\n" +
+        "        char* rs = (char*)fs_roots[i].addr;\n" +
+        "        for (char* q = rs; q + sizeof(void*) <= rs + fs_roots[i].size; q += sizeof(void*)) {\n" +
+        "            void* candidate;\n" +
+        "            memcpy(&candidate, q, sizeof(void*));\n" +
+        "            fs_mark_ptr(candidate);\n" +
+        "        }\n" +
+        "    }\n" +
+        "    void* sp_marker = NULL;\n" +
+        "    void* sp = &sp_marker;\n" +
+        "    char* lo = (char*)sp < (char*)fs_stack_bottom ? (char*)sp : (char*)fs_stack_bottom;\n" +
+        "    char* hi = (char*)sp < (char*)fs_stack_bottom ? (char*)fs_stack_bottom : (char*)sp;\n" +
+        "    for (char* q = lo; q + sizeof(void*) <= hi; q += sizeof(void*)) {\n" +
+        "        void* candidate;\n" +
+        "        memcpy(&candidate, q, sizeof(void*));\n" +
+        "        fs_mark_ptr(candidate);\n" +
+        "    }\n" +
+        "    while (fs_work_n > 0) {\n" +
+        "        fs_block_t* b = fs_work[--fs_work_n];\n" +
+        "        fs_scan_block(b);\n" +
+        "    }\n" +
+        "    fs_block_t** pp = &fs_heap;\n" +
+        "    fs_live = 0;\n" +
+        "    while (*pp) {\n" +
+        "        fs_block_t* b = *pp;\n" +
+        "        if (b->mark) { b->mark = 0; fs_live += b->size; pp = &b->next; }\n" +
+        "        else { *pp = b->next; free(b); }\n" +
+        "    }\n" +
+        "}\n" +
+        "\n" +
+        "static void* fs_alloc(size_t n) {\n" +
+        "    if (fs_live + n > fs_threshold) fs_gc();\n" +
+        "    fs_block_t* b = (fs_block_t*)malloc(sizeof(fs_block_t) + n);\n" +
+        "    if (b == NULL) { fs_gc(); b = (fs_block_t*)malloc(sizeof(fs_block_t) + n); }\n" +
+        "    b->size = n; b->mark = 0; b->next = fs_heap; fs_heap = b;\n" +
+        "    fs_live += n;\n" +
+        "    return (void*)(b + 1);\n" +
+        "}\n" +
+        "\n" +
+        "static bool fs_str_eq(fsstring_t a, fsstring_t b) {\n" +
+        "    return a.len == b.len && (a.len == 0 || memcmp(a.data, b.data, (size_t)a.len) == 0);\n" +
+        "}\n" +
+        "\n" +
+        "static fsstring_t fs_str_concat(fsstring_t a, fsstring_t b) {\n" +
+        "    fsstring_t r;\n" +
+        "    r.len = a.len + b.len;\n" +
+        "    r.data = (char*)fs_alloc((size_t)r.len + 1);\n" +
+        "    memcpy(r.data, a.data, (size_t)a.len);\n" +
+        "    memcpy(r.data + a.len, b.data, (size_t)b.len);\n" +
+        "    r.data[r.len] = 0;\n" +
+        "    return r;\n" +
+        "}\n" +
+        "\n" +
+        "// --- exceptions ---\n" +
+        "typedef struct fs_handler { jmp_buf buf; struct fs_handler* prev; } fs_handler_t;\n" +
+        "static fs_handler_t* fs_handler_top = NULL;\n" +
+        "static fsstring_t fs_exn_msg;\n" +
+        "\n" +
+        "static void fs_raise(fsstring_t msg) {\n" +
+        "    fs_exn_msg = msg;\n" +
+        "    if (fs_handler_top) longjmp(fs_handler_top->buf, 1);\n" +
+        "    fwrite(msg.data, 1, (size_t)msg.len, stderr);\n" +
+        "    fputc('\\n', stderr);\n" +
+        "    exit(1);\n" +
+        "}\n" +
+        "\n" +
+        "static int32_t int_of_string(fsstring_t s) { return (int32_t)atoi(s.data); }\n" +
+        "\n" +
+        "static int32_t str_get(fsstring_t s, int32_t i) {\n" +
+        "    if (i < 0 || i >= s.len) return -1;\n" +
+        "    return (unsigned char)s.data[i];\n" +
+        "}\n" +
+        "\n" +
+        "static fsstring_t str_sub(fsstring_t s, int32_t start, int32_t len) {\n" +
+        "    if (start < 0) { len += start; start = 0; }\n" +
+        "    if (start > s.len) start = s.len;\n" +
+        "    if (len < 0 || start + len > s.len) len = s.len - start;\n" +
+        "    fsstring_t r;\n" +
+        "    r.len = len;\n" +
+        "    r.data = (char*)fs_alloc((size_t)len + 1);\n" +
+        "    memcpy(r.data, s.data + start, (size_t)len);\n" +
+        "    r.data[len] = 0;\n" +
+        "    return r;\n" +
+        "}\n" +
+        "\n" +
+        "static fsstring_t int_to_string(int32_t x) {\n" +
+        "    char buf[32];\n" +
+        "    int n = snprintf(buf, sizeof(buf), \"%d\", x);\n" +
+        "    fsstring_t r;\n" +
+        "    r.len = (int32_t)n;\n" +
+        "    r.data = (char*)fs_alloc((size_t)n + 1);\n" +
+        "    memcpy(r.data, buf, (size_t)n);\n" +
+        "    r.data[n] = 0;\n" +
+        "    return r;\n" +
+        "}\n" +
+        "\n" +
+        "static fsstring_t bool_to_string(bool b) {\n" +
+        "    return b ? (fsstring_t){ .len = 4, .data = (char*)\"true\" }\n" +
+        "             : (fsstring_t){ .len = 5, .data = (char*)\"false\" };\n" +
+        "}\n" +
+        "\n" +
+        "static fsstring_t read_line(void) {\n" +
+        "    char buf[4096];\n" +
+        "    if (fgets(buf, sizeof(buf), stdin) == NULL) {\n" +
+        "        fsstring_t r; r.len = 0; r.data = (char*)fs_alloc(1); r.data[0] = 0; return r;\n" +
+        "    }\n" +
+        "    int32_t n = (int32_t)strlen(buf);\n" +
+        "    while (n > 0 && (buf[n - 1] == '\\n' || buf[n - 1] == '\\r')) n--;\n" +
+        "    fsstring_t r; r.len = n; r.data = (char*)fs_alloc((size_t)n + 1);\n" +
+        "    memcpy(r.data, buf, (size_t)n); r.data[n] = 0;\n" +
+        "    return r;\n" +
+        "}\n" +
+        "\n" +
+        "static fsstring_t read_file(fsstring_t path) {\n" +
+        "    fsstring_t empty; empty.len = 0; empty.data = (char*)fs_alloc(1); empty.data[0] = 0;\n" +
+        "    FILE* f = fopen(path.data, \"rb\");\n" +
+        "    if (f == NULL) return empty;\n" +
+        "    fseek(f, 0, SEEK_END);\n" +
+        "    long sz = ftell(f);\n" +
+        "    fseek(f, 0, SEEK_SET);\n" +
+        "    fsstring_t r; r.len = (int32_t)sz;\n" +
+        "    r.data = (char*)fs_alloc((size_t)sz + 1);\n" +
+        "    size_t got = fread(r.data, 1, (size_t)sz, f);\n" +
+        "    r.data[got] = 0;\n" +
+        "    fclose(f);\n" +
+        "    return r;\n" +
+        "}\n" +
+        "\n" +
+        "static void write_file(fsstring_t path, fsstring_t content) {\n" +
+        "    FILE* f = fopen(path.data, \"wb\");\n" +
+        "    if (f != NULL) { fwrite(content.data, 1, (size_t)content.len, f); fclose(f); }\n" +
+        "}\n"
+
+    let declSb = StringBuilder()
+    for (n, t, _, _) in topValueList do
+        declSb.AppendLine(sprintf "static %s v_%s;" (ctypeArg (Typer.resolveTy t)) n) |> ignore
+
+    let fwdSb = StringBuilder()
+    for (n, ps, r, _) in topFunList do
+        let args = ps |> List.mapi (fun i t -> ctypeArg t + " a" + string i) |> String.concat ", "
+        fwdSb.AppendLine(sprintf "static %s v_%s(%s);" (ctypeRet r) n args) |> ignore
+
+    let defSb = StringBuilder()
+    out <- defSb
+    level <- 0
+    for (n, ps, r, e) in topFunList do
+        let (paramInfos, body) = flattenFun e
+        let args = paramInfos |> List.mapi (fun i (_, pt) -> ctypeArg pt + " p" + string i) |> String.concat ", "
+        line (sprintf "static %s v_%s(%s) {" (ctypeRet r) n args)
+        let savedLevel = level
+        level <- 1
+        let paramScope =
+            paramInfos |> List.mapi (fun i (pn, pt) -> pn, { CName = "p" + string i; Ty = pt; Mutable = false })
+        withScope paramScope (fun () ->
+            if Typer.resolveTy r = UnitTy then emitStmt body
+            else emitTailReturn body)
+        level <- savedLevel
+        line "}"
+    level <- 0
+
+    let mainSb = StringBuilder()
+    out <- mainSb
+    level <- 0
+    match prog.MainArg with
+    | Some _ -> line "int main(int argc, char** argv) {"
+    | None -> line "int main(void) {"
+    level <- 1
+
+    line "{ void* fs_stack_anchor; fs_gc_init(&fs_stack_anchor); }"
+    for (n, t, _, _) in topValueList do
+        line (sprintf "fs_add_root((void*)&v_%s, sizeof(%s));" n (ctypeArg (Typer.resolveTy t)))
+
+    match prog.MainArg with
+    | Some argName ->
+        let ln = listName StringTy
+        scope <- Map.add argName { CName = "v_" + argName; Ty = TNamed("list", [ StringTy ]); Mutable = false } scope
+        line (sprintf "%s* v_%s = NULL;" ln argName)
+        line (sprintf "{ int32_t i = argc - 1; while (i >= 0) { %s* n = (%s*)fs_alloc(sizeof(%s)); n->head = (fsstring_t){ .len = (int32_t)strlen(argv[i]), .data = argv[i] }; n->tail = v_%s; v_%s = n; i = i - 1; } }" ln ln ln argName argName)
+    | None -> ()
+
+    for (n, _, e, _) in topValueList do
+        line (sprintf "v_%s = %s;" n (value e))
+    match prog.Main with
+    | Some body -> emitStmt body
+    | None -> ()
+    line "return 0;"
+    level <- 0
+    line "}"
+
+    let final = StringBuilder()
+    final.Append(preamble).AppendLine() |> ignore
+    for name in (prog.Types |> Map.toList |> List.map fst) do
+        final.AppendLine(sprintf "typedef struct fs_%s fs_%s;" name name) |> ignore
+    final.AppendLine() |> ignore
+    for s in typedefBuf do
+        final.AppendLine(s) |> ignore
+    final.AppendLine() |> ignore
+    for s in eqFwdBuf do
+        final.AppendLine(s) |> ignore
+    final.AppendLine() |> ignore
+    for s in eqBuf do
+        final.AppendLine(s) |> ignore
+    final.AppendLine() |> ignore
+    final.Append(declSb.ToString()) |> ignore
+    final.Append(fwdSb.ToString()) |> ignore
+    final.AppendLine() |> ignore
+    for s in thunkBuf do
+        final.AppendLine(s) |> ignore
+    final.AppendLine() |> ignore
+    final.Append(defSb.ToString()) |> ignore
+    final.Append(mainSb.ToString()) |> ignore
+    final.ToString()

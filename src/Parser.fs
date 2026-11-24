@@ -1,0 +1,567 @@
+module Fss.Parser
+
+open Fss.Ast
+
+type P = { Toks: Lexer.Token array; mutable Idx: int }
+
+let peek (p: P) : Lexer.Token = p.Toks.[p.Idx]
+
+let peek2 (p: P) : Lexer.Token =
+    if p.Idx + 1 < p.Toks.Length then p.Toks.[p.Idx + 1]
+    else p.Toks.[p.Toks.Length - 1]
+
+let advance (p: P) : Lexer.Token =
+    let t = p.Toks.[p.Idx]
+    p.Idx <- p.Idx + 1
+    t
+
+let expect (p: P) (k: Lexer.TokKind) : unit =
+    let t = peek p
+    if t.Kind = k then advance p |> ignore
+    else failwith ("line " + string t.Line + ": expected " + Lexer.tokKindName k + " but found " + Lexer.tokKindName t.Kind)
+
+let startsAtom (k: Lexer.TokKind) : bool =
+    match k with
+    | Lexer.IntLit _ | Lexer.StrLit _ | Lexer.True | Lexer.False | Lexer.LParen | Lexer.Ident _
+    | Lexer.LBracket | Lexer.LBrace -> true
+    | _ -> false
+
+let startsPattern (k: Lexer.TokKind) : bool =
+    match k with
+    | Lexer.IntLit _ | Lexer.StrLit _ | Lexer.True | Lexer.False | Lexer.LParen | Lexer.Ident _
+    | Lexer.LBracket -> true
+    | _ -> false
+
+// --- Types -----------------------------------------------------------------
+
+let rec parseType (p: P) : Ty = parseTypeArrow p
+
+and parseTypeArrow (p: P) : Ty =
+    let l = parseTypeStar p
+    if (peek p).Kind = Lexer.Arrow then
+        advance p |> ignore
+        FunTy(l, parseTypeArrow p)
+    else
+        l
+
+and parseTypeStar (p: P) : Ty =
+    let first = parseTypeApp p
+    let mutable items = [ first ]
+    while (peek p).Kind = Lexer.Star do
+        advance p |> ignore
+        items <- items @ [ parseTypeApp p ]
+    match items with
+    | [ t ] -> t
+    | _ -> TupleTy items
+
+and parseTypeApp (p: P) : Ty =
+    let mutable t = parseTypeAtom p
+    let mutable go = true
+    while go do
+        match (peek p).Kind with
+        | Lexer.List -> advance p |> ignore; t <- TNamed("list", [ t ])
+        | Lexer.Option -> advance p |> ignore; t <- TNamed("option", [ t ])
+        | _ -> go <- false
+    t
+
+and parseTypeAtom (p: P) : Ty =
+    match (peek p).Kind with
+    | Lexer.Ident "int" -> advance p |> ignore; IntTy
+    | Lexer.Ident "bool" -> advance p |> ignore; BoolTy
+    | Lexer.Ident "unit" -> advance p |> ignore; UnitTy
+    | Lexer.Ident "string" -> advance p |> ignore; StringTy
+    | Lexer.Ident n -> advance p |> ignore; TNamed(n, [])
+    | Lexer.LParen ->
+        advance p |> ignore
+        let t = parseType p
+        expect p Lexer.RParen
+        t
+    | k -> failwith ("line " + string (peek p).Line + ": expected type, found " + Lexer.tokKindName k)
+
+let parseTypeDecl (p: P) : (string * TypeDef) =
+    expect p Lexer.Type
+    match (peek p).Kind with
+    | Lexer.Ident name ->
+        advance p |> ignore
+        expect p Lexer.Eq
+        if (peek p).Kind = Lexer.LBrace then
+            advance p |> ignore
+            let rec fieldsLoop acc =
+                match (peek p).Kind with
+                | Lexer.RBrace -> advance p |> ignore; List.rev acc
+                | Lexer.Ident f ->
+                    advance p |> ignore
+                    expect p Lexer.Colon
+                    let ft = parseType p
+                    if (peek p).Kind = Lexer.Semi then advance p |> ignore
+                    fieldsLoop ((f, ft) :: acc)
+                | k -> failwith ("line " + string (peek p).Line + ": expected record field, found " + Lexer.tokKindName k)
+            (name, RecordDef(fieldsLoop []))
+        else
+            if (peek p).Kind = Lexer.Bar then advance p |> ignore
+            let rec casesLoop acc =
+                match (peek p).Kind with
+                | Lexer.Ident c ->
+                    advance p |> ignore
+                    let payload = if (peek p).Kind = Lexer.Of then (advance p |> ignore; parseType p) else UnitTy
+                    if (peek p).Kind = Lexer.Bar then advance p |> ignore; casesLoop ((c, payload) :: acc)
+                    else List.rev ((c, payload) :: acc)
+                | k -> failwith ("line " + string (peek p).Line + ": expected union case, found " + Lexer.tokKindName k)
+            (name, UnionDef(casesLoop []))
+    | k -> failwith ("line " + string (peek p).Line + ": expected type name, found " + Lexer.tokKindName k)
+
+// --- Patterns --------------------------------------------------------------
+
+let rec parsePattern (p: P) : Pattern =
+    let atom = parsePatternAtom p
+    if (peek p).Kind = Lexer.Cons then
+        advance p |> ignore
+        PCons(atom, parsePattern p)
+    else
+        atom
+
+and parsePatternAtom (p: P) : Pattern =
+    match (peek p).Kind with
+    | Lexer.Ident "_" -> advance p |> ignore; PWildcard
+    | Lexer.Ident n ->
+        advance p |> ignore
+        if startsPattern (peek p).Kind then PUnion(n, Some(parsePatternAtom p))
+        else PVar n
+    | Lexer.IntLit n -> advance p |> ignore; PInt n
+    | Lexer.StrLit s -> advance p |> ignore; PStr s
+    | Lexer.True -> advance p |> ignore; PBool true
+    | Lexer.False -> advance p |> ignore; PBool false
+    | Lexer.LParen ->
+        advance p |> ignore
+        if (peek p).Kind = Lexer.RParen then
+            advance p |> ignore
+            PUnit
+        else
+            let first = parsePattern p
+            if (peek p).Kind = Lexer.Comma then
+                let mutable items = [ first ]
+                while (peek p).Kind = Lexer.Comma do
+                    advance p |> ignore
+                    items <- items @ [ parsePattern p ]
+                expect p Lexer.RParen
+                PTuple items
+            else
+                expect p Lexer.RParen
+                first
+    | Lexer.LBracket ->
+        advance p |> ignore
+        if (peek p).Kind = Lexer.RBracket then
+            advance p |> ignore
+            PNil
+        else
+            let first = parsePattern p
+            let mutable items = [ first ]
+            while (peek p).Kind = Lexer.Semi do
+                advance p |> ignore
+                items <- items @ [ parsePattern p ]
+            expect p Lexer.RBracket
+            List.foldBack (fun h t -> PCons(h, t)) items PNil
+    | k -> failwith ("line " + string (peek p).Line + ": expected pattern, found " + Lexer.tokKindName k)
+
+// --- Expressions -----------------------------------------------------------
+
+let rec parseExpr (p: P) : Expr = parseSeq p
+
+and parseSeq (p: P) : Expr =
+    let first = parseStmt p
+    let mutable items = [ first ]
+    while (peek p).Kind = Lexer.Semi do
+        advance p |> ignore
+        items <- items @ [ parseStmt p ]
+    match items with
+    | [ x ] -> x
+    | _ -> Seq items
+
+and parseStmt (p: P) : Expr =
+    match (peek p).Kind with
+    | Lexer.If ->
+        advance p |> ignore
+        let c = parseOr p
+        expect p Lexer.Then
+        let t = parseStmt p
+        let rest = parseIfTail p
+        If(c, t, rest)
+
+    | Lexer.While ->
+        advance p |> ignore
+        let c = parseOr p
+        expect p Lexer.Do
+        let b = parseStmt p
+        While(c, b)
+
+    | Lexer.Match -> parseMatch p
+
+    | Lexer.Try -> parseTry p
+
+    | Lexer.Let ->
+        advance p |> ignore
+        let mutableFlag =
+            if (peek p).Kind = Lexer.Mutable then
+                advance p |> ignore
+                true
+            else
+                false
+        let recFlag =
+            if (peek p).Kind = Lexer.Rec then
+                advance p |> ignore
+                true
+            else
+                false
+
+        match (peek p).Kind with
+        | Lexer.Ident name ->
+            advance p |> ignore
+
+            if (peek p).Kind = Lexer.Eq then
+                expect p Lexer.Eq
+                let bound = parseStmt p
+                expect p Lexer.In
+                let body = parseStmt p
+                if mutableFlag && recFlag then
+                    failwith ("line " + string (peek p).Line + ": 'let mutable rec' is not valid")
+                elif mutableFlag then LetMutable(name, bound, body)
+                elif recFlag then LetRec(name, bound, body)
+                else Let(name, bound, body)
+            else
+                if mutableFlag then
+                    failwith ("line " + string (peek p).Line + ": 'let mutable' cannot define a function")
+
+                let rec paramsLoop acc =
+                    match (peek p).Kind with
+                    | Lexer.Ident pn -> advance p |> ignore; paramsLoop (pn :: acc)
+                    | _ -> List.rev acc
+
+                let ps = paramsLoop []
+                if List.isEmpty ps then
+                    failwith ("line " + string (peek p).Line + ": expected '=' or function parameters after '" + name + "'")
+                expect p Lexer.Eq
+                let fnBody = parseStmt p
+                expect p Lexer.In
+                let body = parseStmt p
+                let fn = List.foldBack (fun pn b -> Fun(pn, b)) ps fnBody
+                if recFlag then LetRec(name, fn, body)
+                else Let(name, fn, body)
+        | k -> failwith ("line " + string (peek p).Line + ": expected name after 'let', found " + Lexer.tokKindName k)
+
+    | Lexer.Ident name when (peek2 p).Kind = Lexer.Assign ->
+        advance p |> ignore
+        advance p |> ignore
+        let e = parseStmt p
+        Assign(name, e)
+
+    | _ -> parseOr p
+
+and parseMatch (p: P) : Expr =
+    advance p |> ignore
+    let scrut = parseOr p
+    expect p Lexer.With
+    if (peek p).Kind = Lexer.Bar then advance p |> ignore
+
+    let rec armsLoop acc =
+        let pat = parsePattern p
+        expect p Lexer.Arrow
+        let body = parseStmt p
+        let acc' = (pat, body) :: acc
+        if (peek p).Kind = Lexer.Bar then
+            advance p |> ignore
+            armsLoop acc'
+        else
+            List.rev acc'
+
+    Match(scrut, armsLoop [])
+
+and parseIfTail (p: P) : Expr =
+    match (peek p).Kind with
+    | Lexer.Elif ->
+        advance p |> ignore
+        let c = parseOr p
+        expect p Lexer.Then
+        let t = parseStmt p
+        If(c, t, parseIfTail p)
+    | Lexer.Else ->
+        advance p |> ignore
+        parseStmt p
+    | k -> failwith ("line " + string (peek p).Line + ": expected 'elif' or 'else', found " + Lexer.tokKindName k)
+
+and parseTry (p: P) : Expr =
+    advance p |> ignore
+    let body = parseStmt p
+    expect p Lexer.With
+    if (peek p).Kind = Lexer.Bar then advance p |> ignore
+
+    let rec armsLoop acc =
+        let pat = parsePattern p
+        expect p Lexer.Arrow
+        let handler = parseStmt p
+        let acc' = (pat, handler) :: acc
+        if (peek p).Kind = Lexer.Bar then
+            advance p |> ignore
+            armsLoop acc'
+        else
+            List.rev acc'
+
+    Try(body, armsLoop [])
+
+and parseOr (p: P) : Expr =
+    let mutable left = parseAnd p
+    let mutable go = true
+    while go do
+        match (peek p).Kind with
+        | Lexer.Or -> advance p |> ignore; left <- Binary(Or, left, parseAnd p)
+        | _ -> go <- false
+    left
+
+and parseAnd (p: P) : Expr =
+    let mutable left = parseCmp p
+    let mutable go = true
+    while go do
+        match (peek p).Kind with
+        | Lexer.And -> advance p |> ignore; left <- Binary(And, left, parseCmp p)
+        | _ -> go <- false
+    left
+
+and parseCmp (p: P) : Expr =
+    let mutable left = parseCons p
+    let mutable go = true
+    while go do
+        let op =
+            match (peek p).Kind with
+            | Lexer.Eq -> Some Eq
+            | Lexer.Ne -> Some Ne
+            | Lexer.Lt -> Some Lt
+            | Lexer.Le -> Some Le
+            | Lexer.Gt -> Some Gt
+            | Lexer.Ge -> Some Ge
+            | _ -> None
+        match op with
+        | Some o -> advance p |> ignore; left <- Binary(o, left, parseCons p)
+        | None -> go <- false
+    left
+
+and parseCons (p: P) : Expr =
+    let l = parseAdd p
+    if (peek p).Kind = Lexer.Cons then
+        advance p |> ignore
+        Cons(l, parseCons p)
+    else
+        l
+
+and parseAdd (p: P) : Expr =
+    let mutable left = parseMul p
+    let mutable go = true
+    while go do
+        match (peek p).Kind with
+        | Lexer.Plus -> advance p |> ignore; left <- Binary(Add, left, parseMul p)
+        | Lexer.Minus -> advance p |> ignore; left <- Binary(Sub, left, parseMul p)
+        | _ -> go <- false
+    left
+
+and parseMul (p: P) : Expr =
+    let mutable left = parseUnary p
+    let mutable go = true
+    while go do
+        match (peek p).Kind with
+        | Lexer.Star -> advance p |> ignore; left <- Binary(Mul, left, parseUnary p)
+        | Lexer.Slash -> advance p |> ignore; left <- Binary(Div, left, parseUnary p)
+        | Lexer.Percent -> advance p |> ignore; left <- Binary(Mod, left, parseUnary p)
+        | _ -> go <- false
+    left
+
+and parseUnary (p: P) : Expr =
+    match (peek p).Kind with
+    | Lexer.Minus -> advance p |> ignore; Unary(Neg, parseUnary p)
+    | Lexer.Not -> advance p |> ignore; Unary(Not, parseUnary p)
+    | _ -> parseApply p
+
+and parseApply (p: P) : Expr =
+    let mutable e = parseAtom p
+    while startsAtom (peek p).Kind do
+        e <- Apply(e, parseAtom p)
+    e
+
+and parseAtom (p: P) : Expr =
+    let mutable e = parsePrimary p
+    while (peek p).Kind = Lexer.Dot do
+        advance p |> ignore
+        match (peek p).Kind with
+        | Lexer.Ident f -> advance p |> ignore; e <- Field(e, f)
+        | k -> failwith ("line " + string (peek p).Line + ": expected field name after '.', found " + Lexer.tokKindName k)
+    e
+
+and parsePrimary (p: P) : Expr =
+    match (peek p).Kind with
+    | Lexer.IntLit n -> advance p |> ignore; Int n
+    | Lexer.StrLit s -> advance p |> ignore; Str s
+    | Lexer.True -> advance p |> ignore; Bool true
+    | Lexer.False -> advance p |> ignore; Bool false
+    | Lexer.Ident "None" -> advance p |> ignore; ENone
+    | Lexer.Ident "Some" ->
+        advance p |> ignore
+        ESome(parseAtom p)
+    | Lexer.Ident name -> advance p |> ignore; Var name
+    | Lexer.Fun ->
+        advance p |> ignore
+        match (peek p).Kind with
+        | Lexer.Ident pn ->
+            advance p |> ignore
+            expect p Lexer.Arrow
+            let body = parseStmt p
+            Fun(pn, body)
+        | k -> failwith ("line " + string (peek p).Line + ": expected parameter name after 'fun', found " + Lexer.tokKindName k)
+    | Lexer.LParen ->
+        advance p |> ignore
+        if (peek p).Kind = Lexer.RParen then
+            advance p |> ignore
+            Unit
+        else
+            let first = parseExpr p
+            if (peek p).Kind = Lexer.Comma then
+                let mutable items = [ first ]
+                while (peek p).Kind = Lexer.Comma do
+                    advance p |> ignore
+                    items <- items @ [ parseExpr p ]
+                expect p Lexer.RParen
+                Tuple items
+            else
+                expect p Lexer.RParen
+                first
+    | Lexer.LBracket ->
+        advance p |> ignore
+        if (peek p).Kind = Lexer.RBracket then
+            advance p |> ignore
+            Nil
+        else
+            let first = parseStmt p
+            let mutable items = [ first ]
+            while (peek p).Kind = Lexer.Semi do
+                advance p |> ignore
+                items <- items @ [ parseStmt p ]
+            expect p Lexer.RBracket
+            List.foldBack (fun h t -> Cons(h, t)) items Nil
+    | Lexer.LBrace ->
+        advance p |> ignore
+        let isFieldStart =
+            match (peek p).Kind, (peek2 p).Kind with
+            | Lexer.Ident _, Lexer.Eq -> true
+            | _ -> false
+        if isFieldStart then
+            let rec fieldsLoop acc =
+                match (peek p).Kind with
+                | Lexer.RBrace -> advance p |> ignore; List.rev acc
+                | Lexer.Ident f ->
+                    advance p |> ignore
+                    expect p Lexer.Eq
+                    let v = parseStmt p
+                    if (peek p).Kind = Lexer.Semi then advance p |> ignore
+                    fieldsLoop ((f, v) :: acc)
+                | k -> failwith ("line " + string (peek p).Line + ": expected record field, found " + Lexer.tokKindName k)
+            Record(None, fieldsLoop [])
+        else
+            let baseE = parseStmt p
+            expect p Lexer.With
+            let rec fieldsLoop acc =
+                match (peek p).Kind with
+                | Lexer.RBrace -> advance p |> ignore; List.rev acc
+                | Lexer.Ident f ->
+                    advance p |> ignore
+                    expect p Lexer.Eq
+                    let v = parseStmt p
+                    if (peek p).Kind = Lexer.Semi then advance p |> ignore
+                    fieldsLoop ((f, v) :: acc)
+                | k -> failwith ("line " + string (peek p).Line + ": expected record field, found " + Lexer.tokKindName k)
+            Record(Some baseE, fieldsLoop [])
+    | k -> failwith ("line " + string (peek p).Line + ": unexpected token " + Lexer.tokKindName k)
+
+// --- Top level -------------------------------------------------------------
+
+let parseDef (p: P) : Def =
+    expect p Lexer.Let
+    let mutableFlag =
+        if (peek p).Kind = Lexer.Mutable then
+            advance p |> ignore
+            true
+        else
+            false
+    let recFlag =
+        if (peek p).Kind = Lexer.Rec then
+            advance p |> ignore
+            true
+        else
+            false
+
+    match (peek p).Kind with
+    | Lexer.Ident name ->
+        advance p |> ignore
+
+        if (peek p).Kind = Lexer.LParen then
+            expect p Lexer.LParen
+            expect p Lexer.RParen
+            expect p Lexer.Eq
+            let body = parseExpr p
+            if name <> "main" || recFlag then
+                failwith ("line " + string (peek p).Line + ": only 'let main () = ...' may take unit parameters in v0.1")
+            Main(None, body)
+        elif (peek p).Kind = Lexer.Eq then
+            expect p Lexer.Eq
+            let body = parseExpr p
+            if mutableFlag && recFlag then failwith "'let mutable rec' is not valid"
+            elif mutableFlag then MutableConst(name, body)
+            elif recFlag then ConstRec(name, body)
+            else Const(name, body)
+        else
+            let rec paramsLoop acc =
+                match (peek p).Kind with
+                | Lexer.Ident pn -> advance p |> ignore; paramsLoop (pn :: acc)
+                | _ -> List.rev acc
+
+            let ps = paramsLoop []
+            if List.isEmpty ps then
+                failwith ("line " + string (peek p).Line + ": expected '=' or parameters after '" + name + "'")
+            if mutableFlag then
+                failwith ("line " + string (peek p).Line + ": 'let mutable' cannot define a function")
+            expect p Lexer.Eq
+            let body = parseStmt p
+            if name = "main" && not recFlag then
+                match ps with
+                | [ pname ] -> Main(Some pname, body)
+                | _ -> failwith ("line " + string (peek p).Line + ": 'main' takes at most one argument")
+            elif recFlag then
+                let rec andLoop acc =
+                    if (peek p).Kind = Lexer.AndKw then
+                        advance p |> ignore
+                        match (peek p).Kind with
+                        | Lexer.Ident bn ->
+                            advance p |> ignore
+                            let bps = paramsLoop []
+                            if List.isEmpty bps then failwith ("line " + string (peek p).Line + ": expected parameters")
+                            expect p Lexer.Eq
+                            let bbody = parseStmt p
+                            let bfn = List.foldBack (fun pn b -> Fun(pn, b)) bps bbody
+                            andLoop ((bn, bfn) :: acc)
+                        | k -> failwith ("line " + string (peek p).Line + ": expected name after 'and', found " + Lexer.tokKindName k)
+                    else List.rev acc
+                (let group = (name, List.foldBack (fun pn b -> Fun(pn, b)) ps body) :: andLoop []
+                 match group with
+                 | [ (n, f) ] -> ConstRec(n, f)
+                 | _ -> RecGroup group)
+            else
+                let fn = List.foldBack (fun pn b -> Fun(pn, b)) ps body
+                Const(name, fn)
+    | k -> failwith ("line " + string (peek p).Line + ": expected name after 'let', found " + Lexer.tokKindName k)
+
+let parse (src: string) : Program =
+    let toks = Lexer.tokenize src
+    let p = { Toks = Array.ofList toks; Idx = 0 }
+
+    let rec loop types defs =
+        match (peek p).Kind with
+        | Lexer.EOF -> { Types = List.rev types; Defs = List.rev defs }
+        | Lexer.Type -> loop (parseTypeDecl p :: types) defs
+        | _ -> loop types (parseDef p :: defs)
+
+    loop [] []

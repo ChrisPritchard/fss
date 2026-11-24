@@ -1,0 +1,11 @@
+# Normalize line endings to LF in the repository; keep them LF on checkout.
+* text=auto
+
+# Explicitly treat these as text so CRLF is normalized.
+*.fs   text eol=lf
+*.fss  text eol=lf
+*.fsx  text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+*.json text eol=lf
+*.csproj text eol=lf

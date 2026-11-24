@@ -1,0 +1,5 @@
+let main () =
+    let mutable acc = "" in
+    let mutable i = 0 in
+    (while i < 20000 do (acc <- acc + "x"; i <- i + 1);
+     print_int (str_len acc); print_newline ())

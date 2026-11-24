@@ -1,0 +1,1 @@
+let main () = let x = 5 in print_int (x 1)

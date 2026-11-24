@@ -1,0 +1,2 @@
+let main () =
+    (print_int 1; print_newline (); print_int 2; print_newline ())

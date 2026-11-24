@@ -1,0 +1,11 @@
+let collatz_len n =
+    let mutable steps = 0 in
+    let mutable m = n in
+    (while m <> 1 do ((if m % 2 = 0 then m <- m / 2 else m <- 3 * m + 1); steps <- steps + 1);
+     steps)
+
+let main () =
+    let mutable total = 0 in
+    let mutable i = 1 in
+    (while i <= 100000 do (total <- total + collatz_len i; i <- i + 1);
+     print_int total; print_newline ())

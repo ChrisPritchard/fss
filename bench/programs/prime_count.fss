@@ -1,0 +1,11 @@
+let is_prime n =
+    let mutable d = 2 in
+    let mutable p = n > 1 in
+    (while p && d * d <= n do ((if n % d = 0 then p <- false else ()); d <- d + 1);
+     p)
+
+let main () =
+    let mutable count = 0 in
+    let mutable i = 2 in
+    (while i < 100000 do ((if is_prime i then count <- count + 1 else ()); i <- i + 1);
+     print_int count; print_newline ())
