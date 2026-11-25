@@ -3,6 +3,8 @@
 A small compiler that lowers an F#-like source language to C, then uses the
 system C compiler to produce a native executable (libraries come later).
 
+![](./bench.webp)
+
 Read `DESIGN.md` for the full design: what is kept, converted, reimplemented,
 and dropped, plus the value-representation and memory-model decisions.
 
