@@ -6,6 +6,10 @@ system C compiler to produce a native executable (libraries come later).
 Read `DESIGN.md` for the full design: what is kept, converted, reimplemented,
 and dropped, plus the value-representation and memory-model decisions.
 
+> **Work in progress.** This is an early, incomplete implementation (v0.2).
+> The language surface, runtime, and self-hosting bootstrap are still
+> evolving, so expect rough edges and breaking changes.
+
 ## Status
 
 Implemented so far (v0.2):
@@ -154,6 +158,11 @@ on a few code shapes (recursive function + option + `if`), so it may not compile
 `bootstrap/parser.fs`; the managed compiler (`dotnet fss.dll`) handles it, and
 the test suite uses the managed compiler. The AOT binary is a bootstrap-only
 optimization and will be retired once self-hosting is complete.
+
+## Acknowledgements
+
+Developed with [Pi](https://pi.dev), an extensible open-source coding-agent
+harness, running on the [DeepSeek Platform](https://platform.deepseek.com).
 
 ## License
 
