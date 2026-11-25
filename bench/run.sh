@@ -5,27 +5,51 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 FSS_CMD=(dotnet src/bin/Release/net9.0/fss.dll)
-FSC="/c/Program Files/dotnet/sdk/9.0.321/FSharp/fsc.dll"
+
+# --- locate fsc.dll in the newest .NET SDK (portable: Windows/MSYS2 and Linux/WSL) ---
+find_fsc() {
+    local line sdk_ver sdk_root
+    line="$(dotnet --list-sdks 2>/dev/null | tail -1)"
+    [ -z "$line" ] && return 1
+    sdk_ver="${line%% *}"
+    sdk_root="${line#*[}"
+    sdk_root="${sdk_root%]}"
+    sdk_root="${sdk_root//\\//}"       # backslashes -> forward slashes (harmless on Linux)
+    printf '%s/%s/FSharp/fsc.dll' "$sdk_root" "$sdk_ver"
+}
+
+FSC="$(find_fsc)"
+if [ -z "$FSC" ] || [ ! -f "$FSC" ]; then
+    echo "error: could not locate fsc.dll. Is the .NET SDK (with F#) installed?" >&2
+    exit 1
+fi
+
+# On Windows/MSYS2 the fss compiler emits a `.exe`; on Linux/WSL it does not.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) EXE=.exe ;;
+    *) EXE= ;;
+esac
+
 RUNTIMECONFIG='{ "runtimeOptions": { "tfm": "net9.0", "framework": { "name": "Microsoft.NETCore.App", "version": "9.0.0" } } }'
 
 echo "Building the fss compiler (once, not part of per-program timings)..."
-dotnet build src/Fss.fsproj -c Release -v q >/dev/null
+dotnet build src/Fss.fsproj -c Release -v q >/dev/null || { echo "fss compiler build failed" >&2; exit 1; }
 
 rm -rf bench/build
 mkdir -p bench/build
 
 now_ns() { date +%s%N; }
 
-# time_ms <command...>  ->  wall-clock milliseconds (hard timeout 120s)
+# time_ms <command...>  ->  wall-clock milliseconds
 time_ms() {
     local s e
     s=$(now_ns)
-    timeout 120 "$@" >/dev/null 2>&1
+    "$@" >/dev/null 2>&1
     e=$(now_ns)
     echo $(( (e - s) / 1000000 ))
 }
 
-# min_run <binary> <args...>  ->  best of 3 wall-clock ms
+# min_run <command...>  ->  best of 3 wall-clock ms
 min_run() {
     local best=999999999 t
     for _ in 1 2 3; do
@@ -45,10 +69,8 @@ for fss_src in bench/programs/*.fss; do
     [ -f "$fs_src" ] || continue
 
     # --- compile fss -> native C -> gcc ---
-    fss_bin="bench/build/${name}_fss"
-    fss_ct=$(time_ms "${FSS_CMD[@]}" build "$fss_src" -o "$fss_bin")
-    [ -f "$fss_bin" ] || fss_bin="$fss_bin.exe"
-    fss_bin="bench/build/${name}_fss.exe"
+    fss_bin="bench/build/${name}_fss${EXE}"
+    fss_ct=$(time_ms "${FSS_CMD[@]}" build "$fss_src" -o "bench/build/${name}_fss")
 
     # --- compile F# -> .NET assembly ---
     fs_bin="bench/build/${name}_fs.exe"

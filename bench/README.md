@@ -13,11 +13,22 @@ result.
 
 ## Running
 
+Windows (cmd/PowerShell):
+
+```bat
+bench\run.bat
+```
+
+Linux/macOS, WSL, or Git Bash / MSYS2:
+
 ```bash
 bash bench/run.sh
 ```
 
 The fss compiler is built once up front (not part of per-program timings).
+The scripts locate `fsc.dll` automatically from `dotnet --list-sdks`, so they
+work with any .NET SDK that includes F#. In WSL the distro needs its own .NET
+SDK installed (`dotnet --list-sdks` must list at least one SDK).
 
 ## Programs
 
