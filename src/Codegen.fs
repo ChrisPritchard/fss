@@ -865,7 +865,14 @@ let emit (prog: Fss.Mono.Program) : string =
         "static void* fs_stack_bottom = NULL;\n" +
         "static fs_block_t* fs_work[65536];\n" +
         "static int fs_work_n = 0;\n" +
-        "static const size_t fs_threshold = 16 * 1024 * 1024;\n" +
+        "static const size_t fs_threshold = 64 * 1024 * 1024;\n" +
+        "#define FS_CLASSES 64\n" +
+        "static fs_block_t* fs_free_buckets[FS_CLASSES];\n" +
+        "static char* fs_bump = NULL;\n" +
+        "static char* fs_bump_end = NULL;\n" +
+        "#define FS_CHUNK (8 * 1024 * 1024)\n" +
+        "static size_t fs_round_up(size_t n) { size_t r = 1; while (r < n) r <<= 1; return r; }\n" +
+        "static int fs_log2(size_t n) { int c = 0; while (n > 1) { n >>= 1; c++; } return c; }\n" +
         "\n" +
         "static void fs_gc_init(void* anchor) { fs_stack_bottom = anchor; }\n" +
         "static void fs_add_root(void* var_addr, size_t size) {\n" +
@@ -948,14 +955,28 @@ let emit (prog: Fss.Mono.Program) : string =
         "    while (*pp) {\n" +
         "        fs_block_t* b = *pp;\n" +
         "        if (b->mark) { b->mark = 0; fs_live += b->size; pp = &b->next; }\n" +
-        "        else { *pp = b->next; free(b); }\n" +
+        "        else { *pp = b->next; size_t t = fs_round_up(sizeof(fs_block_t) + b->size); int c = fs_log2(t); b->next = fs_free_buckets[c]; fs_free_buckets[c] = b; }\n" +
         "    }\n" +
         "}\n" +
         "\n" +
         "static void* fs_alloc(size_t n) {\n" +
         "    if (fs_live + n > fs_threshold) fs_gc();\n" +
-        "    fs_block_t* b = (fs_block_t*)malloc(sizeof(fs_block_t) + n);\n" +
-        "    if (b == NULL) { fs_gc(); b = (fs_block_t*)malloc(sizeof(fs_block_t) + n); }\n" +
+        "    size_t total = fs_round_up(sizeof(fs_block_t) + n);\n" +
+        "    int c = fs_log2(total);\n" +
+        "    fs_block_t* b = fs_free_buckets[c];\n" +
+        "    if (b != NULL) {\n" +
+        "        fs_free_buckets[c] = b->next;\n" +
+        "        b->size = n; b->mark = 0; b->next = fs_heap; fs_heap = b;\n" +
+        "        fs_live += n;\n" +
+        "        return (void*)(b + 1);\n" +
+        "    }\n" +
+        "    if (fs_bump == NULL || fs_bump + total > fs_bump_end) {\n" +
+        "        fs_bump = (char*)malloc(FS_CHUNK);\n" +
+        "        if (fs_bump == NULL) { fs_gc(); fs_bump = (char*)malloc(FS_CHUNK); }\n" +
+        "        fs_bump_end = fs_bump + FS_CHUNK;\n" +
+        "    }\n" +
+        "    b = (fs_block_t*)fs_bump;\n" +
+        "    fs_bump += total;\n" +
         "    b->size = n; b->mark = 0; b->next = fs_heap; fs_heap = b;\n" +
         "    fs_live += n;\n" +
         "    return (void*)(b + 1);\n" +

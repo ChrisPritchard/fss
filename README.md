@@ -168,10 +168,11 @@ From those benchmarks, fss's advantages relative to F# NativeAOT are:
   `--march-native`, and `--cc <compiler>` are one flag away; F# AOT's codegen
   is opaque by comparison.
 
-The trade-off, visible in the same table: allocation-heavy code (lists, string
-concatenation) is currently slower in fss — it mallocs per node with no
-generational GC, whereas .NET's GC makes short-lived-list churn cheap. That is
-the main area where F# AOT still wins.
+Allocation-heavy code was the historical weak spot; a bump allocator with
+size-class free lists (added in v0.2) brought `sort_list` from ~170 ms to
+~50 ms (now faster than F# JIT and F# AOT) and `str_concat` to ~90 ms (on par
+with F# JIT). The remaining cost for strings is the inherent O(n²) copying of
+immutable concatenation, which .NET pays too.
 
 ## Self-hosting goal
 

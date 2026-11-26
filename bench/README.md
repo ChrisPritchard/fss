@@ -95,9 +95,10 @@ threshold trips.
   is a ~35 ms startup floor (the generated `main` constructs the builtin
   environment and the runtime prologue string at every start). The .NET runtime
   has a ~90 ms startup/JIT floor.
-- **Allocation-heavy code**: `sort_list` is the exception — fss (165 ms) is
-  slightly *slower* than F# (158 ms). fss lists are `malloc`-per-node with no
-  GC, while .NET's generational GC makes short-lived-list churn cheaper.
+- **Allocation-heavy code** (fixed in v0.2): a bump allocator with size-class
+  free lists replaced per-node `malloc`. `sort_list` went from ~170 ms to
+  ~50 ms (now faster than F# JIT and F# AOT), and `str_concat` is ~90 ms (on
+  par with F# JIT).
 - **Known edge case**: a *tail-recursive* function that accumulates a string and
   is not TCO'd by the C compiler (e.g. `repeat n acc = repeat (n-1) (acc+"x")`
   in the fss codegen) can blow past the 16 MB GC threshold and degrade
