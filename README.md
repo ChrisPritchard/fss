@@ -36,6 +36,13 @@ Implemented so far (v0.2):
 - exceptions: `failwith "msg"`, `try e with | pat -> ...` (`_`, variable, or string literal)
 - `let main argv = ...` gives `argv : string list` (also `let main () = ...`)
 - `;` sequencing, scope-correct shadowing
+- **significant whitespace**: newline + indentation is accepted as an
+  alternative to `;`/`in`/`( )`, so F#-style layout just works
+- F# attributes (`[<EntryPoint>]`, etc.) are read and ignored
+- `open System` and `.NET`-style names (`System.Console.WriteLine`,
+  `System.String`, `Console.WriteLine`, ...) are aliased to fss builtins/types
+- `fss scan file.fs` reports F# features fss doesn't support (instead of a
+  hard compile failure)
 - builtins: `print_int`, `print_bool`, `print_newline`, `print_string`, `str_len`,
   `int_to_string`, `bool_to_string`, `read_line`, `read_file`, `write_file`
 
@@ -82,6 +89,7 @@ still works and is what the bootstrap uses.
 ```sh
 fss build prog.fs -o prog          # compiles to prog.exe (Windows) or prog
 fss build a.fs b.fs -o app         # multiple files are merged in order
+fss scan prog.fs                   # list unsupported F# features
 ./prog
 ```
 
@@ -98,10 +106,22 @@ signed overflow would otherwise be undefined behaviour.
 
 ## Syntax notes (small deviations from F#, for now)
 
-- Sequencing uses `;` instead of newline/indentation: `print_int 1; print_newline ()`
-- A `while`/`if`/`let`/function body is a *single statement*; use `( ... )` for several:
-  `while i < 3 do (print_int i; print_newline (); i <- i + 1)`
-- Local bindings use `in`: `let x = 1 in print_int x`
+Both the verbose form (`;`, `in`, `( ... )`) and F#-style layout work:
+
+```fsharp
+// verbose
+print_int 1; print_newline ()
+let x = 1 in print_int x
+
+// significant whitespace
+print_int 1
+print_newline ()
+let x = 1
+print_int x
+```
+
+- A `while`/`if`/`let`/function body is a *single statement*; in the verbose
+  form use `( ... )` for several, or indent a block in the layout form
 - Functions: `let add x y = x + y`, `let rec fact n = if n = 0 then 1 else n * fact (n - 1)`
 - Lambdas: `fun x -> x + 1`; application: `f x y`
 

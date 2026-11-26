@@ -6,7 +6,8 @@ open System.IO
 open Fss.Typer
 
 let private usage =
-    "usage: fss build <file.fs> [-o <output>] [--keep-c] [-O<0|1|2|3|s|fast>] [--cc <name>] [--march-native]"
+    "usage: fss build <file.fs> [-o <output>] [--keep-c] [-O<0|1|2|3|s|fast>] [--cc <name>] [--march-native]\n" +
+    "       fss scan <file.fs>   # report F# features fss does not support"
 
 let private compileC (cc: string) (opt: string) (marchNative: bool) (cPath: string) (outPath: string) : unit =
     // -fwrapv: F# `int` arithmetic is unchecked and wraps; C signed overflow
@@ -32,7 +33,8 @@ let private runBuild (srcPaths: string list) (out: string) (keepC: bool) (cc: st
     let progs = srcPaths |> List.map (fun p -> File.ReadAllText p |> Fss.Parser.parse)
     let prog : Fss.Ast.Program =
         { Types = progs |> List.collect (fun p -> p.Types)
-          Defs = progs |> List.collect (fun p -> p.Defs) }
+          Defs = progs |> List.collect (fun p -> p.Defs)
+          Opens = progs |> List.collect (fun p -> p.Opens) }
     let tprog = Fss.Typer.check prog
     let mono = Fss.Mono.monomorphize tprog
     let c = Fss.Codegen.emit mono
@@ -84,6 +86,23 @@ let main (argv: string array) : int =
             with
             | TypeError msg -> eprintfn "type error: %s" msg; 1
             | ex -> eprintfn "error: %s" ex.Message; 1
+        | "scan" ->
+            if argv.Length < 2 then
+                eprintfn "%s" usage
+                1
+            else
+                try
+                    let src = File.ReadAllText argv.[1]
+                    let findings = Fss.Scan.scan src
+                    if List.isEmpty findings then
+                        printfn "no unsupported F# features found in %s" argv.[1]
+                        0
+                    else
+                        findings |> List.iter (printfn "%s")
+                        0
+                with ex ->
+                    eprintfn "error: %s" ex.Message
+                    1
         | _ ->
             eprintfn "%s" usage
             1

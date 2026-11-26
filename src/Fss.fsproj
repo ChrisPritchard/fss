@@ -10,6 +10,7 @@
   <ItemGroup>
     <Compile Include="Ast.fs" />
     <Compile Include="Lexer.fs" />
+    <Compile Include="Scan.fs" />
     <Compile Include="Parser.fs" />
     <Compile Include="Typer.fs" />
     <Compile Include="Mono.fs" />

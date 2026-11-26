@@ -37,7 +37,7 @@ type UnaryOp =
     | Not
 
 /// Builtin effectful functions, seeded into the initial environment.
-let builtinNames = [ "print_int"; "print_bool"; "print_newline"; "print_string"; "str_len"; "int_to_string"; "bool_to_string"; "read_line"; "read_file"; "write_file"; "str_get"; "str_sub"; "int_of_string" ]
+let builtinNames = [ "print_int"; "print_bool"; "print_newline"; "print_string"; "println"; "str_len"; "int_to_string"; "bool_to_string"; "read_line"; "read_file"; "write_file"; "str_get"; "str_sub"; "int_of_string" ]
 
 /// Patterns (used in match arms).
 type Pattern =
@@ -93,7 +93,7 @@ type Def =
     | RecGroup of (string * Expr) list  // let rec f ... and g ...
     | Main of string option * Expr  // let main () = expr | let main argv = expr
 
-type Program = { Types: (string * TypeDef) list; Defs: Def list }
+type Program = { Types: (string * TypeDef) list; Defs: Def list; Opens: string list }
 
 /// Pretty-printer, used in tests and error messages.
 let rec exprToString (e: Expr) : string =

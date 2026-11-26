@@ -58,6 +58,32 @@ SDK installed (`dotnet --list-sdks` must list at least one SDK).
 
 Timings are wall-clock milliseconds; runs are the best of 3.
 
+## AOT comparison
+
+`bench/aot_bench.sh` also compares against **C# NativeAOT** and **F#
+NativeAOT** (single self-contained binaries that dispatch on a program name),
+plus F# JIT as a baseline:
+
+```bash
+bash bench/aot_bench.sh
+```
+
+Sample (MSYS2, gcc 15, .NET 9, win-x64):
+
+| program      | fss ms | F# AOT ms | C# AOT ms | F# JIT ms |
+|--------------|--------|-----------|-----------|-----------|
+| fib30        | 43     | 65        | 61        | 118       |
+| loop_count   | 32     | 56        | 54        | 107       |
+| collatz      | 41     | 49        | 52        | 103       |
+| str_concat   | 107    | 73        | 62        | 116       |
+| prime_count  | 34     | 40        | 42        | 89        |
+
+NativeAOT publish times were ~2.4 s (C#) and ~4.8 s (F#), vs ~250 ms per
+program for fss (lex + type + C codegen + `gcc -O2`). fss native code is
+competitive with NativeAOT on compute-bound loops, though `str_concat` is
+slower because fss strings leak intermediate allocations until the 16 MB GC
+threshold trips.
+
 ## Takeaways
 
 - **Compile time**: fss is ~2.5× faster (~250 ms vs ~700 ms). fss compiles a

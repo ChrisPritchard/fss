@@ -194,6 +194,7 @@ let private builtinEnv : Map<string, Binding> =
         "print_bool", { Scheme = Scheme([], FunTy(BoolTy, UnitTy)); Mutable = false }
         "print_newline", { Scheme = Scheme([], FunTy(UnitTy, UnitTy)); Mutable = false }
         "print_string", { Scheme = Scheme([], FunTy(StringTy, UnitTy)); Mutable = false }
+        "println", { Scheme = Scheme([], FunTy(StringTy, UnitTy)); Mutable = false }
         "str_len", { Scheme = Scheme([], FunTy(StringTy, IntTy)); Mutable = false }
         "int_to_string", { Scheme = Scheme([], FunTy(IntTy, StringTy)); Mutable = false }
         "bool_to_string", { Scheme = Scheme([], FunTy(BoolTy, StringTy)); Mutable = false }
@@ -701,8 +702,9 @@ let check (prog: Program) : TProgram =
                 match arg with
                 | Some a -> Map.add a { Scheme = Scheme([], TNamed("list", [ StringTy ])); Mutable = false } env
                 | None -> env
-            let (t, tb) = infer env' typeDefs caseInfo body
-            unify t UnitTy
+            // main's return value is discarded by the C runtime; accept any
+            // type so `[<EntryPoint>] let main argv = ... 0` also works.
+            let (_, tb) = infer env' typeDefs caseInfo body
             loop env consts (Some tb) arg rest
 
     let tprog = loop env0 [] None None prog.Defs

@@ -2,7 +2,7 @@ module Fss.Parser
 
 open Fss.Ast
 
-type P = { Toks: Lexer.Token array; mutable Idx: int }
+type P = { Toks: Lexer.Token array; mutable Idx: int; mutable Opens: string list }
 
 let peek (p: P) : Lexer.Token = p.Toks.[p.Idx]
 
@@ -31,6 +31,51 @@ let startsPattern (k: Lexer.TokKind) : bool =
     | Lexer.IntLit _ | Lexer.StrLit _ | Lexer.True | Lexer.False | Lexer.LParen | Lexer.Ident _
     | Lexer.LBracket -> true
     | _ -> false
+
+// --- Namespaces / dotted names ---------------------------------------------
+
+let private namespaceRoots =
+    [ "System"; "Console"; "IO"; "File"; "Collections"; "Generic"; "Math"
+      "Text"; "Threading"; "Linq"; "Diagnostics"; "Runtime" ]
+    |> Set.ofList
+
+let private isNamespaceRoot (n: string) = Set.contains n namespaceRoots
+
+/// Parse `Ident (. Ident)*` into "A.B.C" (the leading Ident must already be the
+/// current token).
+let private parseDottedName (p: P) : string =
+    match (peek p).Kind with
+    | Lexer.Ident n ->
+        advance p |> ignore
+        let sb = System.Text.StringBuilder(n)
+        while (peek p).Kind = Lexer.Dot do
+            advance p |> ignore
+            match (peek p).Kind with
+            | Lexer.Ident m -> advance p |> ignore; sb.Append('.').Append(m) |> ignore
+            | k -> failwith ("line " + string (peek p).Line + ": expected name after '.', found " + Lexer.tokKindName k)
+        sb.ToString()
+    | k -> failwith ("line " + string (peek p).Line + ": expected name, found " + Lexer.tokKindName k)
+
+/// Map a namespace-qualified .NET call to an fss builtin.
+let private resolveValueName (full: string) : string option =
+    match full with
+    | "System.Console.WriteLine" | "Console.WriteLine" -> Some "println"
+    | "System.Console.Write" | "Console.Write" -> Some "print_string"
+    | "System.Console.ReadLine" | "Console.ReadLine" -> Some "read_line"
+    | "System.IO.File.ReadAllText" | "File.ReadAllText" -> Some "read_file"
+    | "System.IO.File.WriteAllText" | "File.WriteAllText" -> Some "write_file"
+    | _ -> None
+
+/// Map a (possibly namespace-qualified) .NET type name to a builtin fss type.
+let private resolveTypeName (opens: string list) (name: string) : Ty option =
+    let hasOpen ns = List.contains ns opens
+    match name with
+    | "System.String" | "System.Int32" | "System.Boolean" -> Some(if name = "System.String" then StringTy elif name = "System.Int32" then IntTy else BoolTy)
+    | "String" when hasOpen "System" -> Some StringTy
+    | "Int32" when hasOpen "System" -> Some IntTy
+    | "Boolean" when hasOpen "System" -> Some BoolTy
+    | "System.Object" | "System.Char" | "System.Double" | "System.Decimal" | "System.Int64" -> None
+    | _ -> None
 
 // --- Types -----------------------------------------------------------------
 
@@ -70,7 +115,11 @@ and parseTypeAtom (p: P) : Ty =
     | Lexer.Ident "bool" -> advance p |> ignore; BoolTy
     | Lexer.Ident "unit" -> advance p |> ignore; UnitTy
     | Lexer.Ident "string" -> advance p |> ignore; StringTy
-    | Lexer.Ident n -> advance p |> ignore; TNamed(n, [])
+    | Lexer.Ident _ ->
+        let name = parseDottedName p
+        match resolveTypeName p.Opens name with
+        | Some t -> t
+        | None -> TNamed(name, [])
     | Lexer.LParen ->
         advance p |> ignore
         let t = parseType p
@@ -109,6 +158,24 @@ let parseTypeDecl (p: P) : (string * TypeDef) =
                 | k -> failwith ("line " + string (peek p).Line + ": expected union case, found " + Lexer.tokKindName k)
             (name, UnionDef(casesLoop []))
     | k -> failwith ("line " + string (peek p).Line + ": expected type name, found " + Lexer.tokKindName k)
+
+/// Parse one function parameter: a bare name, or `(name : Type)` where the
+/// type annotation is read and discarded (fss has no type annotations yet).
+let parseParam (p: P) : string =
+    match (peek p).Kind with
+    | Lexer.Ident name -> advance p |> ignore; name
+    | Lexer.LParen ->
+        advance p |> ignore
+        match (peek p).Kind with
+        | Lexer.Ident name ->
+            advance p |> ignore
+            if (peek p).Kind = Lexer.Colon then
+                advance p |> ignore
+                parseType p |> ignore
+            expect p Lexer.RParen
+            name
+        | k -> failwith ("line " + string (peek p).Line + ": expected parameter name, found " + Lexer.tokKindName k)
+    | k -> failwith ("line " + string (peek p).Line + ": expected parameter, found " + Lexer.tokKindName k)
 
 // --- Patterns --------------------------------------------------------------
 
@@ -233,7 +300,7 @@ and parseStmt (p: P) : Expr =
 
                 let rec paramsLoop acc =
                     match (peek p).Kind with
-                    | Lexer.Ident pn -> advance p |> ignore; paramsLoop (pn :: acc)
+                    | Lexer.Ident _ | Lexer.LParen -> paramsLoop (parseParam p :: acc)
                     | _ -> List.rev acc
 
                 let ps = paramsLoop []
@@ -403,7 +470,22 @@ and parsePrimary (p: P) : Expr =
     | Lexer.Ident "Some" ->
         advance p |> ignore
         ESome(parseAtom p)
-    | Lexer.Ident name -> advance p |> ignore; Var name
+    | Lexer.Ident name ->
+        advance p |> ignore
+        if isNamespaceRoot name && (peek p).Kind = Lexer.Dot then
+            // namespace-qualified call, e.g. System.Console.WriteLine
+            let sb = System.Text.StringBuilder(name)
+            while (peek p).Kind = Lexer.Dot do
+                advance p |> ignore
+                match (peek p).Kind with
+                | Lexer.Ident m -> advance p |> ignore; sb.Append('.').Append(m) |> ignore
+                | k -> failwith ("line " + string (peek p).Line + ": expected name after '.', found " + Lexer.tokKindName k)
+            let full = sb.ToString()
+            match resolveValueName full with
+            | Some b -> Var b
+            | None -> Var full
+        else
+            Var name
     | Lexer.Fun ->
         advance p |> ignore
         match (peek p).Kind with
@@ -498,15 +580,7 @@ let parseDef (p: P) : Def =
     | Lexer.Ident name ->
         advance p |> ignore
 
-        if (peek p).Kind = Lexer.LParen then
-            expect p Lexer.LParen
-            expect p Lexer.RParen
-            expect p Lexer.Eq
-            let body = parseExpr p
-            if name <> "main" || recFlag then
-                failwith ("line " + string (peek p).Line + ": only 'let main () = ...' may take unit parameters in v0.1")
-            Main(None, body)
-        elif (peek p).Kind = Lexer.Eq then
+        if (peek p).Kind = Lexer.Eq then
             expect p Lexer.Eq
             let body = parseExpr p
             if mutableFlag && recFlag then failwith "'let mutable rec' is not valid"
@@ -514,20 +588,25 @@ let parseDef (p: P) : Def =
             elif recFlag then ConstRec(name, body)
             else Const(name, body)
         else
+            if mutableFlag then
+                failwith ("line " + string (peek p).Line + ": 'let mutable' cannot define a function")
+
             let rec paramsLoop acc =
                 match (peek p).Kind with
-                | Lexer.Ident pn -> advance p |> ignore; paramsLoop (pn :: acc)
+                | Lexer.LParen when (peek2 p).Kind = Lexer.RParen ->
+                    advance p |> ignore; advance p |> ignore
+                    List.rev acc
+                | Lexer.Ident _ | Lexer.LParen -> paramsLoop (parseParam p :: acc)
                 | _ -> List.rev acc
 
             let ps = paramsLoop []
-            if List.isEmpty ps then
-                failwith ("line " + string (peek p).Line + ": expected '=' or parameters after '" + name + "'")
-            if mutableFlag then
-                failwith ("line " + string (peek p).Line + ": 'let mutable' cannot define a function")
+            if List.isEmpty ps && name <> "main" then
+                failwith ("line " + string (peek p).Line + ": only 'let main () = ...' may take unit parameters in v0.1")
             expect p Lexer.Eq
-            let body = parseStmt p
+            let body = if name = "main" && not recFlag then parseExpr p else parseStmt p
             if name = "main" && not recFlag then
                 match ps with
+                | [] -> Main(None, body)
                 | [ pname ] -> Main(Some pname, body)
                 | _ -> failwith ("line " + string (peek p).Line + ": 'main' takes at most one argument")
             elif recFlag then
@@ -555,13 +634,23 @@ let parseDef (p: P) : Def =
     | k -> failwith ("line " + string (peek p).Line + ": expected name after 'let', found " + Lexer.tokKindName k)
 
 let parse (src: string) : Program =
-    let toks = Lexer.tokenize src
-    let p = { Toks = Array.ofList toks; Idx = 0 }
+    let toks = Lexer.layout (Lexer.tokenize src)
+    let p = { Toks = Array.ofList toks; Idx = 0; Opens = [] }
 
     let rec loop types defs =
         match (peek p).Kind with
-        | Lexer.EOF -> { Types = List.rev types; Defs = List.rev defs }
+        | Lexer.EOF -> { Types = List.rev types; Defs = List.rev defs; Opens = List.rev p.Opens }
         | Lexer.Type -> loop (parseTypeDecl p :: types) defs
+        | Lexer.Semi | Lexer.In -> advance p |> ignore; loop types defs
+        | Lexer.Open ->
+            advance p |> ignore
+            let ns = parseDottedName p
+            p.Opens <- ns :: p.Opens
+            loop types defs
+        | Lexer.Namespace ->
+            advance p |> ignore
+            parseDottedName p |> ignore
+            loop types defs
         | _ -> loop types (parseDef p :: defs)
 
     loop [] []
