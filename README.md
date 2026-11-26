@@ -44,7 +44,10 @@ Implemented so far (v0.2):
 - `fss scan file.fs` reports F# features fss doesn't support (instead of a
   hard compile failure)
 - builtins: `print_int`, `print_bool`, `print_newline`, `print_string`, `str_len`,
-  `int_to_string`, `bool_to_string`, `read_line`, `read_file`, `write_file`
+  `int_to_string`, `bool_to_string`, `read_line`, `read_file`, `write_file`,
+  `print_double`, `double_to_string`, `int_to_double`, `double_to_int`
+- **C interop**: `double`, `extern` declarations, `#include "h"` / `#link "lib"`
+  (or `[<Include("h")>]` / `[<Link("lib")>]`), so any C library is callable
 
 Not yet: arrays, type annotations, local `let rec` and `and`, full `sprintf`,
 `try/finally`, `raise`. These are the next milestones in `DESIGN.md`.
@@ -62,8 +65,11 @@ Top-level mutual recursion is supported: `let rec even n = … and odd n = …`.
 - User-defined record/union types are **heap-allocated** (pointer-boxed), so
   recursive types like `type Tree = Leaf of int | Node of Tree * Tree` work.
 - Strings are UTF-8 with a length prefix; `str_len` returns the byte length.
-- Heap memory is reclaimed by a small conservative mark-sweep garbage
-  collector (stack + registered-global roots), triggered at a 16 MB threshold.
+- Heap memory uses a bump allocator (8 MB chunks) with 64 size-class free
+  lists, backed by a conservative mark-sweep collector (stack + registered
+  global roots) triggered at a 64 MB threshold.
+- C interop covers `int`, `bool`, `double`, `unit` and (by value) records;
+  raw C pointers / `char*` are not exposed yet, so C string APIs need a helper.
 
 ## Build the compiler
 
@@ -125,6 +131,45 @@ print_int x
 - Functions: `let add x y = x + y`, `let rec fact n = if n = 0 then 1 else n * fact (n - 1)`
 - Lambdas: `fun x -> x + 1`; application: `f x y`
 
+## C interop
+
+fss emits C, so calling into C is direct: no P/Invoke, no marshalling.
+Declare foreign functions with `extern`, and pull in headers/libraries with
+`#include`/`#link` (or the F#-compatible attribute spellings
+`[<Include("...")>]`/`[<Link("...")>]`):
+
+```fsharp
+#include "math.h"
+#link "m"
+
+extern sqrt(x: double) : double
+extern pow(x: double, y: double) : double
+extern abs(x: int) : int
+
+let main () =
+    println (sqrt 144.0)          // 12
+    println (pow 2.0 10.0)        // 1024
+    println (abs (-42))           // 42
+    0
+```
+
+The emitted C becomes `extern double sqrt(double);` plus `-lm` at link time, so
+the call is a plain C function call — the compiler sees through it (gcc can
+inline `sqrt` with `-ffast-math` levels of visibility into libm wrappers).
+
+Interop types: `int` → `int32_t`, `bool` → `bool`, `double` → `double`,
+`string` → `fsstring_t` (UTF-8, length-prefixed; not `char*` — wrap C string
+APIs in a helper for now), `unit` → `void` for a return type.
+
+`double` is a first-class type in fss (`1.5`, `sqrt`, `/`), with
+`int_to_double`, `double_to_int`, `double_to_string`, and `print_double` /
+`println` support. `%` is rejected on `double` (use `fmod` via `extern`).
+
+This is the one place fss diverges from drop-in F# compatibility: `extern`,
+`#include`, and `#link` are fss-only syntax, so a file using them is not
+F#-compilable. Keep interop in its own module if you want the rest of the
+program to stay dual-compilable.
+
 ## Test
 
 ```sh
@@ -167,6 +212,11 @@ From those benchmarks, fss's advantages relative to F# NativeAOT are:
 - **Transparent, tunable C** — `--keep-c` shows the generated C, and `-O3`,
   `--march-native`, and `--cc <compiler>` are one flag away; F# AOT's codegen
   is opaque by comparison.
+- **Direct C interop** — fss *is* C output, so `#include`/`#link` + `extern`
+  give zero-cost calls into libc, libm, OpenGL, zlib, or any C library with no
+  P/Invoke boundary or marshalling layer (see [C interop](#c-interop)). It also
+  means fss inherits whatever targets the C compiler supports (wasm,
+  microcontrollers, static musl builds) by swapping `--cc`.
 
 Allocation-heavy code was the historical weak spot; a bump allocator with
 size-class free lists (added in v0.2) brought `sort_list` from ~170 ms to

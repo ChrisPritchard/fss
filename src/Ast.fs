@@ -6,6 +6,7 @@ type Ty =
     | BoolTy
     | UnitTy
     | StringTy
+    | DoubleTy
     | FunTy of Ty * Ty
     | TyVar of int
     | TNamed of string * Ty list   // records, DUs, list, option
@@ -17,6 +18,7 @@ let rec tyToString (t: Ty) : string =
     | BoolTy -> "bool"
     | UnitTy -> "unit"
     | StringTy -> "string"
+    | DoubleTy -> "double"
     | TyVar n -> "'a" + string n
     | FunTy (a, b) -> "(" + tyToString a + " -> " + tyToString b + ")"
     | TNamed (n, []) -> n
@@ -37,7 +39,7 @@ type UnaryOp =
     | Not
 
 /// Builtin effectful functions, seeded into the initial environment.
-let builtinNames = [ "print_int"; "print_bool"; "print_newline"; "print_string"; "println"; "str_len"; "int_to_string"; "bool_to_string"; "read_line"; "read_file"; "write_file"; "str_get"; "str_sub"; "int_of_string" ]
+let builtinNames = [ "print_int"; "print_bool"; "print_newline"; "print_string"; "println"; "str_len"; "int_to_string"; "bool_to_string"; "read_line"; "read_file"; "write_file"; "str_get"; "str_sub"; "int_of_string"; "print_double"; "double_to_string"; "int_to_double"; "double_to_int" ]
 
 /// Patterns (used in match arms).
 type Pattern =
@@ -55,6 +57,7 @@ type Pattern =
 /// Untyped source expressions.
 type Expr =
     | Int of int64
+    | Float of float
     | Bool of bool
     | Unit
     | Str of string
@@ -92,8 +95,9 @@ type Def =
     | MutableConst of string * Expr  // let mutable name = expr
     | RecGroup of (string * Expr) list  // let rec f ... and g ...
     | Main of string option * Expr  // let main () = expr | let main argv = expr
+    | Extern of string * (string * Ty) list * Ty  // extern name(p1: t1, ...) : ret
 
-type Program = { Types: (string * TypeDef) list; Defs: Def list; Opens: string list }
+type Program = { Types: (string * TypeDef) list; Defs: Def list; Opens: string list; Includes: string list; Links: string list }
 
 /// Pretty-printer, used in tests and error messages.
 let rec exprToString (e: Expr) : string =

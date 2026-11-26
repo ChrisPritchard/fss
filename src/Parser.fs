@@ -2,7 +2,7 @@ module Fss.Parser
 
 open Fss.Ast
 
-type P = { Toks: Lexer.Token array; mutable Idx: int; mutable Opens: string list }
+type P = { Toks: Lexer.Token array; mutable Idx: int; mutable Opens: string list; mutable Includes: string list; mutable Links: string list }
 
 let peek (p: P) : Lexer.Token = p.Toks.[p.Idx]
 
@@ -22,7 +22,7 @@ let expect (p: P) (k: Lexer.TokKind) : unit =
 
 let startsAtom (k: Lexer.TokKind) : bool =
     match k with
-    | Lexer.IntLit _ | Lexer.StrLit _ | Lexer.True | Lexer.False | Lexer.LParen | Lexer.Ident _
+    | Lexer.IntLit _ | Lexer.FloatLit _ | Lexer.StrLit _ | Lexer.True | Lexer.False | Lexer.LParen | Lexer.Ident _
     | Lexer.LBracket | Lexer.LBrace -> true
     | _ -> false
 
@@ -115,6 +115,8 @@ and parseTypeAtom (p: P) : Ty =
     | Lexer.Ident "bool" -> advance p |> ignore; BoolTy
     | Lexer.Ident "unit" -> advance p |> ignore; UnitTy
     | Lexer.Ident "string" -> advance p |> ignore; StringTy
+    | Lexer.Ident "double" -> advance p |> ignore; DoubleTy
+    | Lexer.Ident "void" -> advance p |> ignore; UnitTy
     | Lexer.Ident _ ->
         let name = parseDottedName p
         match resolveTypeName p.Opens name with
@@ -465,6 +467,7 @@ and parseAtom (p: P) : Expr =
 and parsePrimary (p: P) : Expr =
     match (peek p).Kind with
     | Lexer.IntLit n -> advance p |> ignore; Int n
+    | Lexer.FloatLit f -> advance p |> ignore; Float f
     | Lexer.StrLit s -> advance p |> ignore; Str s
     | Lexer.True -> advance p |> ignore; Bool true
     | Lexer.False -> advance p |> ignore; Bool false
@@ -563,6 +566,29 @@ and parsePrimary (p: P) : Expr =
 
 // --- Top level -------------------------------------------------------------
 
+/// Parse `extern name(p1: t1, p2: t2) : ret` — a foreign C function declaration.
+let parseExtern (p: P) : Def =
+    advance p |> ignore
+    match (peek p).Kind with
+    | Lexer.Ident name ->
+        advance p |> ignore
+        let rec paramsLoop acc =
+            match (peek p).Kind with
+            | Lexer.Ident pn ->
+                advance p |> ignore
+                expect p Lexer.Colon
+                let t = parseType p
+                if (peek p).Kind = Lexer.Comma then (advance p |> ignore; paramsLoop ((pn, t) :: acc))
+                else List.rev ((pn, t) :: acc)
+            | _ -> List.rev acc
+        expect p Lexer.LParen
+        let ps = paramsLoop []
+        expect p Lexer.RParen
+        expect p Lexer.Colon
+        let ret = parseType p
+        Extern(name, ps, ret)
+    | k -> failwith ("line " + string (peek p).Line + ": expected extern name, found " + Lexer.tokKindName k)
+
 let parseDef (p: P) : Def =
     expect p Lexer.Let
     let mutableFlag =
@@ -637,11 +663,11 @@ let parseDef (p: P) : Def =
 
 let parse (src: string) : Program =
     let toks = Lexer.layout (Lexer.tokenize src)
-    let p = { Toks = Array.ofList toks; Idx = 0; Opens = [] }
+    let p = { Toks = Array.ofList toks; Idx = 0; Opens = []; Includes = []; Links = [] }
 
     let rec loop types defs =
         match (peek p).Kind with
-        | Lexer.EOF -> { Types = List.rev types; Defs = List.rev defs; Opens = List.rev p.Opens }
+        | Lexer.EOF -> { Types = List.rev types; Defs = List.rev defs; Opens = List.rev p.Opens; Includes = List.rev p.Includes; Links = List.rev p.Links }
         | Lexer.Type -> loop (parseTypeDecl p :: types) defs
         | Lexer.Semi | Lexer.In -> advance p |> ignore; loop types defs
         | Lexer.Open ->
@@ -653,6 +679,15 @@ let parse (src: string) : Program =
             advance p |> ignore
             parseDottedName p |> ignore
             loop types defs
+        | Lexer.Include h ->
+            advance p |> ignore
+            p.Includes <- h :: p.Includes
+            loop types defs
+        | Lexer.Link l ->
+            advance p |> ignore
+            p.Links <- l :: p.Links
+            loop types defs
+        | Lexer.Extern -> loop types (parseExtern p :: defs)
         | _ -> loop types (parseDef p :: defs)
 
     loop [] []

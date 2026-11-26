@@ -9,7 +9,10 @@ type Program =
       Ctors: Map<string, string * Ty>
       Consts: (string * Ty * TExpr * bool) list
       Main: TExpr option
-      MainArg: string option }
+      MainArg: string option
+      Externs: (string * (string * Ty) list * Ty) list
+      Includes: string list
+      Links: string list }
 
 let monomorphize (tprog: TProgram) : Program =
     let schemes = Map.ofList (tprog.Consts |> List.map (fun (n, s, _, _) -> n, s))
@@ -48,7 +51,7 @@ let monomorphize (tprog: TProgram) : Program =
     let rec specE (subst: Map<int, Ty>) (e: TExpr) : TExpr =
         let rt t = resolveTy (substTyVars subst (zonk t))
         match e with
-        | TInt _ | TBool _ | TUnit | TStr _ -> e
+        | TInt _ | TFloat _ | TBool _ | TUnit | TStr _ -> e
         | TNil t -> TNil(rt t)
         | TNone t -> TNone(rt t)
         | TVar (n, t) ->
@@ -119,4 +122,7 @@ let monomorphize (tprog: TProgram) : Program =
       Ctors = tprog.Ctors
       Consts = List.ofSeq outConsts
       Main = main'
-      MainArg = tprog.MainArg }
+      MainArg = tprog.MainArg
+      Externs = tprog.Externs
+      Includes = tprog.Includes
+      Links = tprog.Links }

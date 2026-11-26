@@ -7,6 +7,7 @@ exception TypeError of string
 /// Typed expression tree.
 type TExpr =
     | TInt of int64
+    | TFloat of float
     | TBool of bool
     | TUnit
     | TStr of string
@@ -55,11 +56,15 @@ type TProgram =
       Ctors: Map<string, string * Ty>
       Consts: (string * Scheme * TExpr * bool) list
       Main: TExpr option
-      MainArg: string option }
+      MainArg: string option
+      Externs: (string * (string * Ty) list * Ty) list
+      Includes: string list
+      Links: string list }
 
 let rec tyOf (e: TExpr) : Ty =
     match e with
     | TInt _ -> IntTy
+    | TFloat _ -> DoubleTy
     | TBool _ -> BoolTy
     | TUnit -> UnitTy
     | TStr _ -> StringTy
@@ -204,6 +209,10 @@ let private builtinEnv : Map<string, Binding> =
         "str_get", { Scheme = Scheme([], FunTy(StringTy, FunTy(IntTy, IntTy))); Mutable = false }
         "str_sub", { Scheme = Scheme([], FunTy(StringTy, FunTy(IntTy, FunTy(IntTy, StringTy)))); Mutable = false }
         "int_of_string", { Scheme = Scheme([], FunTy(StringTy, IntTy)); Mutable = false }
+        "print_double", { Scheme = Scheme([], FunTy(DoubleTy, UnitTy)); Mutable = false }
+        "double_to_string", { Scheme = Scheme([], FunTy(DoubleTy, StringTy)); Mutable = false }
+        "int_to_double", { Scheme = Scheme([], FunTy(IntTy, DoubleTy)); Mutable = false }
+        "double_to_int", { Scheme = Scheme([], FunTy(DoubleTy, IntTy)); Mutable = false }
     ]
 
 let private buildCaseInfo (types: (string * TypeDef) list) : Map<string, string * Ty> =
@@ -286,6 +295,8 @@ let rec private infer (env: Map<string, Binding>) (typeDefs: Map<string, TypeDef
             err ("integer literal " + string n + " is out of range for int (32-bit)")
         (IntTy, TInt n)
 
+    | Float f -> (DoubleTy, TFloat f)
+
     | Str s -> (StringTy, TStr s)
 
     | Bool b -> (BoolTy, TBool b)
@@ -300,8 +311,9 @@ let rec private infer (env: Map<string, Binding>) (typeDefs: Map<string, TypeDef
 
     | Unary (Neg, x) ->
         let (tx, txExpr) = infer env typeDefs caseInfo x
-        unify tx IntTy
-        (IntTy, TUnary(Neg, IntTy, txExpr))
+        let t = if prune tx = DoubleTy then DoubleTy else IntTy
+        unify tx t
+        (t, TUnary(Neg, t, txExpr))
 
     | Unary (Not, x) ->
         let (tx, txExpr) = infer env typeDefs caseInfo x
@@ -317,9 +329,11 @@ let rec private infer (env: Map<string, Binding>) (typeDefs: Map<string, TypeDef
             unify tb StringTy
             (StringTy, TBinary(Add, StringTy, taExpr, tbExpr))
         | Add | Sub | Mul | Div | Mod ->
-            unify ta IntTy
-            unify tb IntTy
-            (IntTy, TBinary(op, IntTy, taExpr, tbExpr))
+            let t = if prune ta = DoubleTy || prune tb = DoubleTy then DoubleTy else IntTy
+            if t = DoubleTy && op = Mod then err "the '%' operator is not defined for double"
+            unify ta t
+            unify tb t
+            (t, TBinary(op, t, taExpr, tbExpr))
         | And | Or ->
             unify ta BoolTy
             unify tb BoolTy
@@ -331,8 +345,9 @@ let rec private infer (env: Map<string, Binding>) (typeDefs: Map<string, TypeDef
             | _ -> ()
             (BoolTy, TBinary(op, BoolTy, taExpr, tbExpr))
         | Lt | Le | Gt | Ge ->
-            unify ta IntTy
-            unify tb IntTy
+            let t = if prune ta = DoubleTy || prune tb = DoubleTy then DoubleTy else IntTy
+            unify ta t
+            unify tb t
             (BoolTy, TBinary(op, BoolTy, taExpr, tbExpr))
 
     | If (c, t, e) ->
@@ -649,15 +664,15 @@ let check (prog: Program) : TProgram =
     let env0 =
         Map.fold (fun acc k v -> Map.add k v acc) builtinEnv ctorEnv
 
-    let rec loop (env: Map<string, Binding>) (consts: (string * Scheme * TExpr * bool) list) (main: TExpr option) (mainArg: string option) : (Def list -> TProgram) =
+    let rec loop (env: Map<string, Binding>) (consts: (string * Scheme * TExpr * bool) list) (externs: (string * (string * Ty) list * Ty) list) (main: TExpr option) (mainArg: string option) : (Def list -> TProgram) =
         function
-        | [] -> { Types = typeDefs; Ctors = caseInfo; Consts = List.rev consts; Main = main; MainArg = mainArg }
+        | [] -> { Types = typeDefs; Ctors = caseInfo; Consts = List.rev consts; Main = main; MainArg = mainArg; Externs = List.rev externs; Includes = prog.Includes; Links = prog.Links }
         | Const (n, e) :: rest ->
             let (t, te) = infer env typeDefs caseInfo e
             if prune t = UnitTy then err ("top-level binding '" + n + "' must not have type unit")
             if Map.containsKey n env then err ("duplicate definition of '" + n + "'")
             let scheme = generalize env t
-            loop (Map.add n { Scheme = scheme; Mutable = false } env) ((n, scheme, te, false) :: consts) main mainArg rest
+            loop (Map.add n { Scheme = scheme; Mutable = false } env) ((n, scheme, te, false) :: consts) externs main mainArg rest
         | ConstRec (n, e) :: rest ->
             if Map.containsKey n env then err ("duplicate definition of '" + n + "'")
             let ftv = freshVar ()
@@ -668,7 +683,7 @@ let check (prog: Program) : TProgram =
             | FunTy _ -> ()
             | _ -> err ("'let rec' value '" + n + "' is not supported; use a function")
             let scheme = generalize env t
-            loop (Map.add n { Scheme = scheme; Mutable = false } env) ((n, scheme, te, false) :: consts) main mainArg rest
+            loop (Map.add n { Scheme = scheme; Mutable = false } env) ((n, scheme, te, false) :: consts) externs main mainArg rest
         | RecGroup bindings :: rest ->
             for (n, _) in bindings do
                 if Map.containsKey n env then err ("duplicate definition of '" + n + "'")
@@ -689,13 +704,18 @@ let check (prog: Program) : TProgram =
             let schemes = typed |> List.map (fun (n, t, _) -> n, Scheme([], t))
             let env'' = List.fold (fun e (n, s) -> Map.add n { Scheme = s; Mutable = false } e) env schemes
             let newConsts = typed |> List.map (fun (n, t, te) -> n, Scheme([], t), te, false)
-            loop env'' (newConsts @ consts) main mainArg rest
+            loop env'' (newConsts @ consts) externs main mainArg rest
         | MutableConst (n, e) :: rest ->
             let (t, te) = infer env typeDefs caseInfo e
             if prune t = UnitTy then err ("top-level binding '" + n + "' must not have type unit")
             if Map.containsKey n env then err ("duplicate definition of '" + n + "'")
             let scheme = Scheme([], t)
-            loop (Map.add n { Scheme = scheme; Mutable = true } env) ((n, scheme, te, true) :: consts) main mainArg rest
+            loop (Map.add n { Scheme = scheme; Mutable = true } env) ((n, scheme, te, true) :: consts) externs main mainArg rest
+        | Extern (n, ps, ret) :: rest ->
+            if Map.containsKey n env then err ("duplicate definition of '" + n + "'")
+            let t = List.foldBack (fun (_, pt) acc -> FunTy(pt, acc)) ps ret
+            let scheme = Scheme([], t)
+            loop (Map.add n { Scheme = scheme; Mutable = false } env) consts ((n, ps, ret) :: externs) main mainArg rest
         | Main (arg, body) :: rest ->
             if main.IsSome then err "more than one entry point (let main () = ...)"
             let env' =
@@ -705,8 +725,8 @@ let check (prog: Program) : TProgram =
             // main's return value is discarded by the C runtime; accept any
             // type so `[<EntryPoint>] let main argv = ... 0` also works.
             let (_, tb) = infer env' typeDefs caseInfo body
-            loop env consts (Some tb) arg rest
+            loop env consts externs (Some tb) arg rest
 
-    let tprog = loop env0 [] None None prog.Defs
+    let tprog = loop env0 [] [] None None prog.Defs
     if tprog.Main.IsNone then err "no entry point: expected 'let main () = ...'"
     tprog

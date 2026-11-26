@@ -59,6 +59,12 @@ let emit (prog: Fss.Mono.Program) : string =
 
     let isBuiltin (n: string) = List.contains n Ast.builtinNames
 
+    /// Emit a double literal that C reads as a `double` (never an integer).
+    let cFloat (f: float) : string =
+        let s = f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+        if s.Contains(".") || s.Contains("e") || s.Contains("E") || s.Contains("n") || s.Contains("i") then s
+        else s + ".0"
+
     let rec foldFunTy (ps: Ty list) (r: Ty) : Ty =
         match ps with
         | [] -> r
@@ -91,6 +97,10 @@ let emit (prog: Fss.Mono.Program) : string =
     let topFuns =
         topFunList |> List.map (fun (n, ps, r, _) -> n, (ps, r)) |> Map.ofList
 
+    // Foreign C functions declared with `extern`.
+    let externFuns =
+        prog.Externs |> List.map (fun (n, ps, r) -> n, (ps |> List.map snd, r)) |> Map.ofList
+
     for (n, t, _, mf) in topValueList do
         scope <- Map.add n { CName = "v_" + n; Ty = t; Mutable = mf } scope
 
@@ -113,6 +123,7 @@ let emit (prog: Fss.Mono.Program) : string =
         | BoolTy -> "bool"
         | UnitTy -> "int32_t"
         | StringTy -> "fsstring_t"
+        | DoubleTy -> "double"
         | FunTy _ -> closureName (Typer.resolveTy t)
         | TNamed ("list", [ e ]) -> listName e
         | TNamed ("option", [ e ]) -> optionName e
@@ -198,7 +209,7 @@ let emit (prog: Fss.Mono.Program) : string =
 
     and eqCall (t: Ty) (a: string) (b: string) : string =
         match Typer.resolveTy t with
-        | IntTy | BoolTy | UnitTy -> a + " == " + b
+        | IntTy | BoolTy | UnitTy | DoubleTy -> a + " == " + b
         | StringTy -> "fs_str_eq(" + a + ", " + b + ")"
         | FunTy _ -> failwith "cannot compare functions"
         | _ -> eqName t + "(" + a + ", " + b + ")"
@@ -273,6 +284,7 @@ let emit (prog: Fss.Mono.Program) : string =
             if Map.containsKey n topFuns then failwith ("function '" + n + "' cannot be used as a value in v0.1")
             elif Map.containsKey n prog.Ctors then failwith ("constructor '" + n + "' cannot be used as a value")
             elif isBuiltin n then failwith ("builtin '" + n + "' cannot be used as a value")
+            elif Map.containsKey n externFuns then failwith ("extern '" + n + "' cannot be used as a value")
             else failwith ("unbound name '" + n + "'")
 
     let withScope (adds: (string * ScopeEntry) list) (f: unit -> 'a) : 'a =
@@ -286,7 +298,7 @@ let emit (prog: Fss.Mono.Program) : string =
     let rec freeVars (e: TExpr) : Set<string> =
         match e with
         | TVar (n, _) -> Set.singleton n
-        | TInt _ | TBool _ | TUnit | TStr _ | TNil _ | TNone _ -> Set.empty
+        | TInt _ | TFloat _ | TBool _ | TUnit | TStr _ | TNil _ | TNone _ -> Set.empty
         | TUnary (_, _, x) -> freeVars x
         | TBinary (_, _, a, b) -> Set.union (freeVars a) (freeVars b)
         | TIf (_, c, t, e) -> Set.unionMany [ freeVars c; freeVars t; freeVars e ]
@@ -333,7 +345,7 @@ let emit (prog: Fss.Mono.Program) : string =
 
     let rec isPure (e: TExpr) : bool =
         match e with
-        | TInt _ | TBool _ | TUnit | TStr _ | TVar _ | TNil _ | TNone _ -> true
+        | TInt _ | TFloat _ | TBool _ | TUnit | TStr _ | TVar _ | TNil _ | TNone _ -> true
         | TUnary (_, _, x) -> isPure x
         | TBinary (_, _, a, b) -> isPure a && isPure b
         | TIf (_, c, t, e) -> isPure c && isPure t && isPure e
@@ -383,6 +395,7 @@ let emit (prog: Fss.Mono.Program) : string =
         match e with
         | TInt n -> string n
         | TBool b -> if b then "true" else "false"
+        | TFloat f -> cFloat f
         | TUnit -> "0"
         | TStr s -> "(fsstring_t){ .len = " + string s.Length + ", .data = (char*)\"" + cEscape s + "\" }"
         | TVar (n, _) ->
@@ -492,6 +505,7 @@ let emit (prog: Fss.Mono.Program) : string =
             match f with
             | TVar (name, _) when Map.containsKey name prog.Ctors -> valueCtor name args
             | TVar (name, _) when isBuiltin name -> valueBuiltin name args
+            | TVar (name, _) when Map.containsKey name externFuns -> valueExternCall name args
             | TVar (name, _) when Map.containsKey name topFuns -> valueTopCall name args (Typer.resolveTy (tyOf e))
             | _ -> valueClosureApply e
 
@@ -525,6 +539,8 @@ let emit (prog: Fss.Mono.Program) : string =
             let (f, args) = collectApp e []
             match f with
             | TVar (name, _) when isBuiltin name -> builtinStmt name args
+            | TVar (name, _) when Map.containsKey name externFuns ->
+                "(void)" + name + "(" + (args |> List.map value |> String.concat ", ") + ");"
             | TVar (name, _) when Map.containsKey name topFuns ->
                 let (ptys, _) = topFuns.[name]
                 if List.length args = List.length ptys then
@@ -546,7 +562,7 @@ let emit (prog: Fss.Mono.Program) : string =
     and eqBin (a: TExpr) (b: TExpr) : string =
         let t = Typer.resolveTy (tyOf a)
         match t with
-        | IntTy | BoolTy | UnitTy -> "(" + value a + ") == (" + value b + ")"
+        | IntTy | BoolTy | UnitTy | DoubleTy -> "(" + value a + ") == (" + value b + ")"
         | _ -> eqCall t (value a) (value b)
 
     and valueBuiltin (name: string) (args: TExpr list) : string =
@@ -559,6 +575,7 @@ let emit (prog: Fss.Mono.Program) : string =
             match Typer.resolveTy (tyOf a) with
             | IntTy -> "({ print_int(" + value a + "); print_newline(); 0; })"
             | BoolTy -> "({ print_bool(" + value a + "); print_newline(); 0; })"
+            | DoubleTy -> "({ print_double(" + value a + "); print_newline(); 0; })"
             | _ -> "({ print_string(" + value a + "); print_newline(); 0; })"
         | "str_len", [ a ] -> "(" + value a + ").len"
         | "int_to_string", [ a ] -> "int_to_string(" + value a + ")"
@@ -569,6 +586,10 @@ let emit (prog: Fss.Mono.Program) : string =
         | "str_get", [ a; b ] -> "str_get(" + value a + ", " + value b + ")"
         | "str_sub", [ a; b; c ] -> "str_sub(" + value a + ", " + value b + ", " + value c + ")"
         | "int_of_string", [ a ] -> "int_of_string(" + value a + ")"
+        | "print_double", [ a ] -> "({ print_double(" + value a + "); 0; })"
+        | "double_to_string", [ a ] -> "double_to_string(" + value a + ")"
+        | "int_to_double", [ a ] -> "((double)(" + value a + "))"
+        | "double_to_int", [ a ] -> "double_to_int(" + value a + ")"
         | _ -> failwith ("bad builtin call: " + name)
 
     and builtinStmt (name: string) (args: TExpr list) : string =
@@ -581,6 +602,7 @@ let emit (prog: Fss.Mono.Program) : string =
             match Typer.resolveTy (tyOf a) with
             | IntTy -> "print_int(" + value a + "); print_newline();"
             | BoolTy -> "print_bool(" + value a + "); print_newline();"
+            | DoubleTy -> "print_double(" + value a + "); print_newline();"
             | _ -> "print_string(" + value a + "); print_newline();"
         | "str_len", [ a ] -> "(void)(" + value a + ".len);"
         | "int_to_string", [ a ] -> "(void)int_to_string(" + value a + ");"
@@ -591,6 +613,10 @@ let emit (prog: Fss.Mono.Program) : string =
         | "str_get", [ a; b ] -> "(void)str_get(" + value a + ", " + value b + ");"
         | "str_sub", [ a; b; c ] -> "(void)str_sub(" + value a + ", " + value b + ", " + value c + ");"
         | "int_of_string", [ a ] -> "(void)int_of_string(" + value a + ");"
+        | "print_double", [ a ] -> "print_double(" + value a + ");"
+        | "double_to_string", [ a ] -> "(void)double_to_string(" + value a + ");"
+        | "int_to_double", [ a ] -> "(void)((double)(" + value a + "));"
+        | "double_to_int", [ a ] -> "(void)double_to_int(" + value a + ");"
         | _ -> failwith ("bad builtin call: " + name)
 
     and valueCtor (name: string) (args: TExpr list) : string =
@@ -604,6 +630,21 @@ let emit (prog: Fss.Mono.Program) : string =
         | _ ->
             let argStr = match args with [ a ] -> value a | _ -> failwith ("constructor arity: " + name)
             "({ " + tn + "* " + tv + " = (" + tn + "*)fs_alloc(sizeof(" + tn + ")); " + tv + "->tag = " + string tag + "; " + tv + "->u.u_" + name + " = " + argStr + "; " + tv + "; })"
+
+    and valueExternCall (name: string) (args: TExpr list) : string =
+        let (ptys, rt) = externFuns.[name]
+        let argStrs = args |> List.map value
+        let n = List.length ptys
+        let isUnit = Typer.resolveTy rt = UnitTy
+        if List.length argStrs = n then
+            let call = name + "(" + String.concat ", " argStrs + ")"
+            if isUnit then "({ " + call + "; 0; })" else call
+        elif List.length argStrs < n then
+            let k = List.length argStrs
+            buildPartial name argStrs (List.take k ptys) (List.skip k ptys) rt
+        else
+            let directVal = name + "(" + String.concat ", " (List.take n argStrs) + ")"
+            applyClosureChain (if isUnit then "({ " + directVal + "; 0; })" else directVal) rt (List.skip n argStrs)
 
     and valueTopCall (name: string) (args: TExpr list) (resultTy: Ty) : string =
         let (ptys, rt) = topFuns.[name]
@@ -1039,6 +1080,16 @@ let emit (prog: Fss.Mono.Program) : string =
         "    return r;\n" +
         "}\n" +
         "\n" +
+        "static fsstring_t double_to_string(double d) {\n" +
+        "    char buf[64];\n" +
+        "    int n = snprintf(buf, sizeof(buf), \"%.15g\", d);\n" +
+        "    if (n < 0) { fsstring_t z; z.len = 0; z.data = (char*)fs_alloc(1); z.data[0] = 0; return z; }\n" +
+        "    fsstring_t r; r.len = (int32_t)n; r.data = (char*)fs_alloc((size_t)n + 1);\n" +
+        "    memcpy(r.data, buf, (size_t)n); r.data[n] = 0; return r;\n" +
+        "}\n" +
+        "static void print_double(double d) { fsstring_t s = double_to_string(d); print_string(s); }\n" +
+        "static int32_t double_to_int(double d) { return (int32_t)d; }\n" +
+        "" +
         "static fsstring_t bool_to_string(bool b) {\n" +
         "    return b ? (fsstring_t){ .len = 4, .data = (char*)\"true\" }\n" +
         "             : (fsstring_t){ .len = 5, .data = (char*)\"false\" };\n" +
@@ -1132,8 +1183,20 @@ let emit (prog: Fss.Mono.Program) : string =
     level <- 0
     line "}"
 
+    // C interop: `#include "..."` directives and `extern` declarations.
+    let externDeclSb2 = StringBuilder()
+    for (n, ps, r) in prog.Externs do
+        let args = ps |> List.mapi (fun i (_, t) -> ctypeArg t + " a" + string i) |> String.concat ", "
+        externDeclSb2.AppendLine(sprintf "extern %s %s(%s);" (ctypeRet r) n args) |> ignore
+
     let final = StringBuilder()
     final.Append(preamble).AppendLine() |> ignore
+    for inc in prog.Includes do
+        if inc.StartsWith("<") then final.AppendLine(sprintf "#include %s" inc) |> ignore
+        else
+            let s = if inc.Contains(".") || inc.Contains("/") || inc.Contains("\\") then inc else inc + ".h"
+            final.AppendLine(sprintf "#include \"%s\"" s) |> ignore
+    final.AppendLine() |> ignore
     for name in (prog.Types |> Map.toList |> List.map fst) do
         final.AppendLine(sprintf "typedef struct fs_%s fs_%s;" name name) |> ignore
     final.AppendLine() |> ignore
@@ -1145,6 +1208,8 @@ let emit (prog: Fss.Mono.Program) : string =
     final.AppendLine() |> ignore
     for s in eqBuf do
         final.AppendLine(s) |> ignore
+    final.AppendLine() |> ignore
+    final.Append(externDeclSb2.ToString()) |> ignore
     final.AppendLine() |> ignore
     final.Append(declSb.ToString()) |> ignore
     final.Append(fwdSb.ToString()) |> ignore

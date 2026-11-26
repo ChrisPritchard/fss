@@ -478,8 +478,15 @@ fss build src/*.fs -o app         # multiple files, link them
    (`reverse`) in one multi-instantiation edge case, and the emitted C
    runtime lacks the .NET compiler's conservative GC and `try`/`with`
    exceptions (it uses `malloc`/`exit` instead).
-9. **Later**: arrays beyond 1-D, `seq`, Map/Set, computation expressions, the
-   OO subset, wasm target.
+9. ~~**C interop**~~ — **done**. `double` is a first-class type;
+   `extern name(p: t, ...) : ret` declares foreign C functions;
+   `#include "h"` / `#include <h>` and `#link "lib"` (or the
+   F#-compatible `[<Include("...")>]` / `[<Link("...")>]` attributes) pull in
+   headers and linker flags. Emitted as plain C `extern` prototypes, so there
+   is no marshalling layer. Raw C pointers / `char*` are not exposed yet.
+10. **Later**: arrays beyond 1-D, `seq`, Map/Set, computation expressions, the
+   OO subset, wasm target, `[<Export>]` (calling fss from C) and zero-copy
+   record structs for C interop.
 
 ---
 

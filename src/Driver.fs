@@ -9,13 +9,14 @@ let private usage =
     "usage: fss build <file.fs> [-o <output>] [--keep-c] [-O<0|1|2|3|s|fast>] [--cc <name>] [--march-native]\n" +
     "       fss scan <file.fs>   # report F# features fss does not support"
 
-let private compileC (cc: string) (opt: string) (marchNative: bool) (cPath: string) (outPath: string) : unit =
+let private compileC (cc: string) (opt: string) (marchNative: bool) (links: string list) (cPath: string) (outPath: string) : unit =
     // -fwrapv: F# `int` arithmetic is unchecked and wraps; C signed overflow
     // would otherwise be undefined behaviour and open to miscompilation.
     let march = if marchNative then "-march=native " else ""
     let psi = ProcessStartInfo()
     psi.FileName <- cc
-    psi.Arguments <- opt + " -fwrapv -Wl,--stack,67108864 " + march + "-o \"" + outPath + "\" \"" + cPath + "\""
+    let linkFlags = links |> List.map (fun l -> " -l" + l) |> String.concat ""
+    psi.Arguments <- opt + " -fwrapv -Wl,--stack,67108864 " + march + "-o \"" + outPath + "\" \"" + cPath + "\"" + linkFlags
     psi.UseShellExecute <- false
     psi.RedirectStandardError <- true
     psi.RedirectStandardOutput <- true
@@ -34,13 +35,15 @@ let private runBuild (srcPaths: string list) (out: string) (keepC: bool) (cc: st
     let prog : Fss.Ast.Program =
         { Types = progs |> List.collect (fun p -> p.Types)
           Defs = progs |> List.collect (fun p -> p.Defs)
-          Opens = progs |> List.collect (fun p -> p.Opens) }
+          Opens = progs |> List.collect (fun p -> p.Opens)
+          Includes = progs |> List.collect (fun p -> p.Includes)
+          Links = progs |> List.collect (fun p -> p.Links) }
     let tprog = Fss.Typer.check prog
     let mono = Fss.Mono.monomorphize tprog
     let c = Fss.Codegen.emit mono
     let cPath = out + ".c"
     File.WriteAllText(cPath, c)
-    compileC cc opt marchNative cPath out
+    compileC cc opt marchNative prog.Links cPath out
     if not keepC then File.Delete cPath
     let exe =
         if File.Exists(out + ".exe") then out + ".exe"

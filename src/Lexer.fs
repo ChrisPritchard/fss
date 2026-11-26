@@ -2,6 +2,7 @@ module Fss.Lexer
 
 type TokKind =
     | IntLit of int64
+    | FloatLit of float
     | StrLit of string
     | Ident of string
     | Let | Mutable | Rec | In | If | Then | Elif | Else | While | Do
@@ -9,6 +10,8 @@ type TokKind =
     | True | False
     | Type | Match | With | Of | List | Option
     | Open | Namespace | Module | For | To | Downto
+    | Extern
+    | Include of string | Link of string
     | LParen | RParen | Eq | Semi
     | Plus | Minus | Star | Slash | Percent
     | Lt | Le | Gt | Ge | Ne
@@ -28,6 +31,7 @@ type Token = { Kind: TokKind; Line: int; Col: int }
 let tokKindName =
     function
     | IntLit n -> "integer " + string n
+    | FloatLit f -> "float " + f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
     | StrLit s -> "string \"" + s + "\""
     | Ident s -> "identifier '" + s + "'"
     | Let -> "let" | Mutable -> "mutable" | Rec -> "rec" | In -> "in"
@@ -39,6 +43,7 @@ let tokKindName =
     | List -> "list" | Option -> "option"
     | Open -> "open" | Namespace -> "namespace" | Module -> "module"
     | For -> "for" | To -> "to" | Downto -> "downto"
+    | Extern -> "extern" | Include s -> "#include \"" + s + "\"" | Link s -> "#link \"" + s + "\""
     | Bar -> "|" | Cons -> "::"
     | LBrace -> "{" | RBrace -> "}" | LBracket -> "[" | RBracket -> "]"
     | Colon -> ":" | Comma -> "," | Dot -> "."
@@ -80,6 +85,7 @@ let private keywords : Map<string, TokKind> =
         "for", For
         "to", To
         "downto", Downto
+        "extern", Extern
     ]
 
 /// Raw tokenization. Newlines are recorded implicitly as a Line change between
@@ -98,17 +104,42 @@ let tokenize (src: string) : Token list =
 
     let emit (k: TokKind) (c: int) = tokens.Add { Kind = k; Line = line; Col = c }
 
-    let rec skipAttr depth =
+    // Attributes are ignored, except that `[<Include("x.h")>]` and
+    // `[<Link("m")>]` act as C interop directives (an F#-compatible spelling
+    // of the `#include` / `#link` directives).
+    let rec skipAttr (depth: int) (sb: System.Text.StringBuilder) =
         if i >= n then failwith ("unterminated attribute at line " + string line)
         elif src.[i] = '[' && i + 1 < n && src.[i + 1] = '<' then
-            i <- i + 2; col <- col + 2; skipAttr (depth + 1)
+            sb.Append('[').Append('<') |> ignore
+            i <- i + 2; col <- col + 2; skipAttr (depth + 1) sb
         elif src.[i] = '>' && i + 1 < n && src.[i + 1] = ']' then
             i <- i + 2; col <- col + 2
-            if depth > 1 then skipAttr (depth - 1)
+            if depth > 1 then
+                sb.Append('>').Append(']') |> ignore
+                skipAttr (depth - 1) sb
         else
             if src.[i] = '\n' then line <- line + 1; col <- 0 else col <- col + 1
+            sb.Append(src.[i]) |> ignore
             i <- i + 1
-            skipAttr depth
+            skipAttr depth sb
+
+    /// Recognise `Include("...")` / `Link("...")` inside attribute text.
+    let attrDirective (text: string) : TokKind option =
+        let tryOne (nm: string) : TokKind option =
+            let idx = text.IndexOf(nm + "(")
+            if idx < 0 then None
+            else
+                let q1 = text.IndexOf('"', idx)
+                if q1 < 0 then None
+                else
+                    let q2 = text.IndexOf('"', q1 + 1)
+                    if q2 < 0 then None
+                    else
+                        let v = text.Substring(q1 + 1, q2 - q1 - 1)
+                        Some(if nm = "Include" then Include v else Link v)
+        match tryOne "Include" with
+        | Some k -> Some k
+        | None -> tryOne "Link"
 
     while i < n do
         let c = src.[i]
@@ -141,15 +172,63 @@ let tokenize (src: string) : Token list =
                     i <- i + 1
             if not closed then failwith ("unterminated comment starting at line " + string startLine)
         elif c = '[' && i + 1 < n && src.[i + 1] = '<' then
+            let startCol = col
             i <- i + 2
             col <- col + 2
-            skipAttr 1
+            let sb = System.Text.StringBuilder()
+            skipAttr 1 sb
+            match attrDirective (sb.ToString()) with
+            | Some k -> emit k startCol
+            | None -> ()
+        elif c = '#' then
+            let startCol = col
+            let start = i
+            i <- i + 1
+            col <- col + 1
+            while i < n && isIdentStart src.[i] do i <- i + 1; col <- col + 1
+            let word = src.Substring(start + 1, i - start - 1)
+            while i < n && (src.[i] = ' ' || src.[i] = '\t') do i <- i + 1; col <- col + 1
+            if i < n && src.[i] = '"' then
+                i <- i + 1; col <- col + 1
+                let s2 = i
+                while i < n && src.[i] <> '"' do i <- i + 1; col <- col + 1
+                let str = src.Substring(s2, i - s2)
+                i <- i + 1; col <- col + 1
+                if word = "include" then emit (Include str) startCol
+                elif word = "link" then emit (Link str) startCol
+                else failwith ("unknown directive '#" + word + "' at line " + string line)
+            elif i < n && src.[i] = '<' then
+                // `#include <stdio.h>`: keep the angle brackets for the emitter.
+                i <- i + 1; col <- col + 1
+                let s2 = i
+                while i < n && src.[i] <> '>' do i <- i + 1; col <- col + 1
+                let str = src.Substring(s2, i - s2)
+                i <- i + 1; col <- col + 1
+                if word = "include" then emit (Include ("<" + str + ">")) startCol
+                else failwith ("unknown directive '#" + word + "' at line " + string line)
+            else failwith ("expected string after '#" + word + "' at line " + string line)
         elif isDigit c then
             let start = i
             let startCol = col
             while i < n && isDigit src.[i] do i <- i + 1; col <- col + 1
-            let text = src.Substring(start, i - start)
-            emit (IntLit(int64 text)) startCol
+            // A '.' followed by a digit makes this a float literal.
+            if i + 1 < n && src.[i] = '.' && isDigit src.[i + 1] then
+                i <- i + 1; col <- col + 1
+                while i < n && isDigit src.[i] do i <- i + 1; col <- col + 1
+                if i < n && (src.[i] = 'e' || src.[i] = 'E') then
+                    let save = i
+                    i <- i + 1; col <- col + 1
+                    if i < n && (src.[i] = '+' || src.[i] = '-') then i <- i + 1; col <- col + 1
+                    if i < n && isDigit src.[i] then
+                        while i < n && isDigit src.[i] do i <- i + 1; col <- col + 1
+                    else
+                        i <- save
+                        col <- col - 1
+                let text = src.Substring(start, i - start)
+                emit (FloatLit(float text)) startCol
+            else
+                let text = src.Substring(start, i - start)
+                emit (IntLit(int64 text)) startCol
         elif c = '"' then
             let startCol = col
             i <- i + 1
