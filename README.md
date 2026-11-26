@@ -21,6 +21,8 @@ Implemented so far (v0.2):
 - arithmetic `+ - * / %`, comparison `= <> < <= > >=`, logic `&& || not`, negation `-`
 - `if / then / else` (statement and expression), `if / then` (unit if), `while / do`
 - `let ... in ...`, `let mutable ... in ...`, `<-`
+- functions with a `unit` parameter: `let f () = ...`, `fun () -> ...`
+- top-level functions as values (`let g = id`, `twice f`), eta-expanded
 - functions: `let f x y = ...`, `let rec f x = ...`, lambdas `fun x -> ...`, application `f x`
 - closures (capture by value; mutable captures by reference), partial application
 - direct-call optimization for fully applied top-level functions; tail-position
@@ -64,8 +66,9 @@ Top-level mutual recursion is supported: `let rec even n = … and odd n = …`.
   monomorphized per use. Local `let` bindings stay monomorphic — hoist them to
   top level if you need polymorphism.
 - Local `let rec` is rejected; define recursive functions at top level.
-- A top-level function can be *applied* but not passed as a value
-  (`let g = f` is rejected); use a lambda instead: `let g = fun x -> f x`.
+- Top-level functions work as values (`let g = id`, `twice greet`): they are
+  eta-expanded into closures. Partially applied forms work too (`add 10`).
+- `let f () = ...` and `fun () -> ...` take a real `unit` parameter.
 - User-defined record/union types are **heap-allocated** (pointer-boxed), so
   recursive types like `type Tree = Leaf of int | Node of Tree * Tree` work.
 - Strings are UTF-8 with a length prefix; `str_len` returns the byte length.

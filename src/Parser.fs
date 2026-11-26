@@ -501,6 +501,11 @@ and parsePrimary (p: P) : Expr =
     | Lexer.Fun ->
         advance p |> ignore
         match (peek p).Kind with
+        | Lexer.LParen when (peek2 p).Kind = Lexer.RParen ->
+            advance p |> ignore; advance p |> ignore
+            expect p Lexer.Arrow
+            let body = parseStmt p
+            Fun("__unit", Some UnitTy, body)
         | Lexer.Ident pn ->
             advance p |> ignore
             expect p Lexer.Arrow
@@ -630,13 +635,16 @@ let parseDef (p: P) : Def =
                 match (peek p).Kind with
                 | Lexer.LParen when (peek2 p).Kind = Lexer.RParen ->
                     advance p |> ignore; advance p |> ignore
-                    List.rev acc
+                    // `let main () = ...` is the entry point (no parameter);
+                    // for other functions `()` is a real unit parameter.
+                    if name = "main" && not recFlag then List.rev acc
+                    else List.rev (("__unit", Some UnitTy) :: acc)
                 | Lexer.Ident _ | Lexer.LParen -> paramsLoop (parseParam p :: acc)
                 | _ -> List.rev acc
 
             let ps = paramsLoop []
-            if List.isEmpty ps && name <> "main" then
-                failwith ("line " + string (peek p).Line + ": only 'let main () = ...' may take unit parameters in v0.1")
+            if ps.IsEmpty && not (name = "main" && not recFlag) then
+                failwith ("line " + string (peek p).Line + ": expected function parameters after '" + name + "'")
             expect p Lexer.Eq
             let body = if name = "main" && not recFlag then parseExpr p else parseStmt p
             if name = "main" && not recFlag then

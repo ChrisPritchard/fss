@@ -453,7 +453,15 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
                 let tn = typeName (TNamed(tname, []))
                 let tv = freshTemp ()
                 "({ " + tn + "* " + tv + " = (" + tn + "*)fs_alloc(sizeof(" + tn + ")); " + tv + "->tag = " + string (tagIndexOf n) + "; " + tv + "; })"
-            | _ -> resolve n
+            | _ ->
+                // A top-level function used as a value: wrap it in a closure
+                // (eta-expansion), so `List.map f`-style code works.
+                match Map.tryFind n topFuns with
+                | Some (ptys, rt) -> buildPartial ("v_" + n) [] [] ptys rt
+                | None ->
+                    match Map.tryFind n externFuns with
+                    | Some (ptys, rt) -> buildPartial ("fs_ext_" + n) [] [] ptys rt
+                    | None -> resolve n
         | TUnary (Neg, _, x) -> sprintf "(-(%s))" (value x)
         | TUnary (Not, _, x) -> sprintf "(!(%s))" (value x)
         | TBinary (Add, ty, a, b) when Typer.resolveTy ty = StringTy ->
