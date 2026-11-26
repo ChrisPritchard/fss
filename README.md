@@ -147,6 +147,32 @@ bash bench/run.sh
 See `bench/README.md` for the current numbers and the takeaways (compile time,
 run time, and where allocation-heavy code behaves differently).
 
+### Why fss over F# NativeAOT?
+
+From those benchmarks, fss's advantages relative to F# NativeAOT are:
+
+- **Compile time** — fss compiles a file in ~280 ms (lex + type-check +
+  monomorphize + C codegen + `gcc -O2`). F# NativeAOT is a whole-program
+  `dotnet publish` taking seconds (~2-6 s for these programs), so fss is
+  ~10-20× faster to iterate on during development.
+- **Run speed on compute-bound code** — fss native code is often faster than
+  F# NativeAOT for loops, integer arithmetic, and recursion (fib ~2.8×, a
+  100M-iteration loop ~7×, prime counting ~2× in `bench/`), because gcc
+  optimizes the emitted C directly (constant folding, strength reduction,
+  tail-call elimination).
+- **No NativeAOT restrictions** — F# NativeAOT forbids reflection and several
+  `printf`/format paths (the benchmark had to switch to
+  `System.Console.WriteLine`). fss has no such constraints: everything lowers
+  to plain C.
+- **Transparent, tunable C** — `--keep-c` shows the generated C, and `-O3`,
+  `--march-native`, and `--cc <compiler>` are one flag away; F# AOT's codegen
+  is opaque by comparison.
+
+The trade-off, visible in the same table: allocation-heavy code (lists, string
+concatenation) is currently slower in fss — it mallocs per node with no
+generational GC, whereas .NET's GC makes short-lived-list churn cheap. That is
+the main area where F# AOT still wins.
+
 ## Self-hosting goal
 
 The .NET compiler is a bootstrap seed. The end goal is to rewrite the compiler
