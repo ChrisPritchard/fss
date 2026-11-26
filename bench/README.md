@@ -68,23 +68,23 @@ Compile and run times are wall-clock milliseconds; runs are the best of 3.
 
 | program      | fss compile | F# compile | fss run | F# JIT | F# AOT | same output |
 |--------------|-------------|------------|---------|--------|--------|-------------|
-| closures     | 366         | 883        | **44**  | 86     | 49     | yes         |
-| collatz      | 332         | 817        | **44**  | 89     | 54     | yes         |
-| du_eval      | 349         | 918        | 488     | 166    | **100**| yes         |
-| fib30        | 343         | 844        | **45**  | 108    | 71     | yes         |
-| float_math   | 355         | 836        | **37**  | 84     | 44     | yes         |
-| loop_count   | 310         | 765        | **32**  | 94     | 57     | yes         |
-| prime_count  | 387         | 810        | **37**  | 75     | 42     | yes         |
-| records      | 432         | 852        | 77      | 89     | **57** | yes         |
-| sort_list    | 338         | 894        | **49**  | 153    | 72     | yes         |
-| str_concat   | 345         | 804        | 73      | 94     | **61** | yes         |
-| string_build | 351         | 814        | **34**  | 75     | 41     | yes         |
-| sum_list     | 336         | 795        | **34**  | 77     | 42     | yes         |
-| tree_sum     | 354         | 886        | **33**  | 71     | 39     | yes         |
+| closures     | 392         | 929        | **47**  | 93     | 52     | yes         |
+| collatz      | 358         | 890        | **46**  | 93     | 59     | yes         |
+| du_eval      | 385         | 993        | 132     | 176    | **97** | yes         |
+| fib30        | 341         | 766        | **43**  | 102    | 68     | yes         |
+| float_math   | 347         | 824        | **36**  | 82     | 42     | yes         |
+| loop_count   | 320         | 785        | **33**  | 89     | 56     | yes         |
+| prime_count  | 327         | 774        | **37**  | 74     | 44     | yes         |
+| records      | 343         | 907        | 71      | 86     | **57** | yes         |
+| sort_list    | 458         | 823        | **50**  | 154    | 75     | yes         |
+| str_concat   | 349         | 819        | 69      | 93     | **59** | yes         |
+| string_build | 368         | 834        | **35**  | 75     | 42     | yes         |
+| sum_list     | 374         | 799        | **36**  | 74     | 41     | yes         |
+| tree_sum     | 355         | 869        | **32**  | 70     | 39     | yes         |
 
-fss wins 10 of 13 against F# NativeAOT and all 13 against F# JIT on startup-
-dominated or compute-bound work; it loses on the three allocation-heavy cases
-(`du_eval`, `records`, `str_concat`).
+fss wins 10 of 13 against F# NativeAOT and all 13 against F# JIT. The three
+remaining losses are the allocation-heavy programs (`du_eval`, `records`,
+`str_concat`), and the gap there is now 1.2-1.4× rather than 5×.
 
 ## AOT comparison
 
@@ -99,23 +99,20 @@ bash bench/aot_bench.sh
 - **Compile time**: fss is ~2.4× faster (~350 ms vs ~850 ms). fss runs a
   single pass of lex → parse → type-check → monomorphize → C codegen plus one
   `gcc -O2` invocation; F# pays `fsc` + .NET toolchain startup.
-- **Run time, compute-bound**: fss native code beats F# NativeAOT by 1.2–1.8×
+- **Run time, compute-bound**: fss native code beats F# NativeAOT by 1.2-1.8×
   (loops, recursion, prime counting, trees, closures, float math) because gcc
-  optimises the emitted C directly. It beats F# JIT by 2× or more on most
-  programs.
-- **Run time, allocation-bound**: `du_eval` (25M short-lived union nodes) is
-  ~5× slower than F# AOT. .NET's generational GC makes gen0 allocation and
-  collection almost free; fss uses a bump allocator with 16-byte size classes
-  plus a conservative mark-sweep collector, which is fast per allocation but
-  pays a full conservative scan + index build per collection. `records` (77 vs
-  57 ms) and `str_concat` (73 vs 61 ms) are the same story at smaller scale.
-  This is the clearest remaining gap and the next optimisation target.
+  optimises the emitted C directly. It beats F# JIT by ~2× on most programs.
+- **Run time, allocation-bound**: this was a 5× loss and is now 1.2-1.4×.
+  The runtime bump-allocates inside 8 MB chunks, recycles freed objects
+  through 16-byte size classes (8-byte block headers) and keeps a per-chunk,
+  append-only index of object starts — so a collection no longer sorts the
+  heap, it walks only what was allocated since the last collection.
+  `du_eval` (25M short-lived union nodes) went 629 ms → 132 ms,
+  `records` 98 → 71 ms, `str_concat` 105 → 69 ms, `sort_list` 170 → 50 ms.
+  .NET still wins these because it moves objects and collections are
+  generational; fss's conservative collector can't move objects (its roots are
+  ambiguous stack words), so there is no nursery yet.
 - **Startup floor**: fss binaries start in ~2 ms; a .NET JIT run pays a ~90 ms
-  runtime/JIT startup, which is why `fib30` (45 vs 108 ms) is not really about
+  runtime/JIT startup, which is why `fib30` (43 vs 102 ms) is not really about
   steady-state speed. F# NativeAOT removes that floor, and its startup is
   comparable to fss.
-- **Fixed in v0.2**: per-node `malloc` was replaced by an 8 MB bump allocator
-  with 16-byte size-class free lists (and recycled blocks keep their size, so
-  reuse is a pointer swap), plus a 16-byte block header. `sort_list` went from
-  ~170 ms to ~49 ms (faster than both F# baselines), `str_concat` from ~105 to
-  ~73 ms, `records` 98 → 77 ms and `du_eval` 629 → 488 ms.

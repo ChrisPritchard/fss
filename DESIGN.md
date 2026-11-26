@@ -392,6 +392,33 @@ internals, refcount for user values, documented no-cycle guarantee), then a
 general `let rec` data. The compiler already knows every type layout, which is
 what makes a precise GC feasible.
 
+### What actually shipped
+
+A **conservative mark-sweep collector with a chunked bump allocator**
+(`src/Codegen.fs` preamble):
+
+- objects are bump-allocated inside 8 MB chunks; freed objects are recycled
+  through 512 fixed-size classes at 16-byte granularity;
+- the block header is 8 bytes (`uint32 total`, `uint32 state`), and a free
+  block's payload holds the free-list link, so overhead is 8 bytes/object;
+- each chunk lazily keeps the **start addresses of its objects in increasing
+  order**, extended at collection time by walking only the part of the chunk
+  allocated since the last collection (bump allocation only appends, so this
+  is a sequential scan — never a sort);
+- pointer→object lookup is a chunk range check plus a binary search inside one
+  chunk, which gives interior-pointer support for conservative scanning;
+- roots are the stack (via `__builtin_unwind_init()`), registered globals and
+  the export initialiser.
+
+Two redesigns drove the allocation-heavy benchmark from ~5× slower than F#
+NativeAOT to near parity: replacing per-object `malloc` with bump + size-class
+recycling, and replacing the per-collection `qsort` of the whole heap with the
+chunk-walk index above (`du_eval`: 629 ms → 132 ms, vs 97 ms for F# AOT).
+
+Known trade-off: the collector never moves objects (conservative stack roots
+make copying unsafe), so there is no generational/nursery promotion yet; that
+is the next step if allocation-heavy code needs more.
+
 ---
 
 ## 7. Project layout

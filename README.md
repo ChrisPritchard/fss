@@ -72,11 +72,13 @@ Top-level mutual recursion is supported: `let rec even n = … and odd n = …`.
 - User-defined record/union types are **heap-allocated** (pointer-boxed), so
   recursive types like `type Tree = Leaf of int | Node of Tree * Tree` work.
 - Strings are UTF-8 with a length prefix; `str_len` returns the byte length.
-- Heap memory uses a bump allocator (8 MB chunks) with 64 size-class free
-  lists, backed by a conservative mark-sweep collector (stack + registered
-  global roots) triggered at a 64 MB threshold.
-- C interop covers `int`, `bool`, `double`, `cstring` (`char*`) and `unit`.
-  Arbitrary struct pointers, callbacks (C function pointers) and arrays are
+- Heap memory is bump-allocated inside 8 MB chunks and recycled through
+  fixed-size classes (16-byte granularity, 8-byte block headers), with a
+  conservative mark-sweep collector (stack + registered global roots) at a
+  64 MB threshold. Each chunk keeps an append-only index of its object starts,
+  so a collection never has to sort the heap.
+- C interop covers `int`, `bool`, `double`, `cstring` (`char*`) and `unit`,
+  plus C function-pointer callbacks. Arbitrary struct pointers and arrays are
   not exposed yet.
 
 ## Build the compiler
@@ -295,23 +297,23 @@ bash bench/aot_bench.sh    # ... and C# NativeAOT
 
 | program      | fss compile | F# compile | fss run | F# JIT | F# AOT |
 |--------------|-------------|------------|---------|--------|--------|
-| closures     | 366         | 883        | **44**  | 86     | 49     |
-| collatz      | 332         | 817        | **44**  | 89     | 54     |
-| du_eval      | 349         | 918        | 488     | 166    | **100**|
-| fib30        | 343         | 844        | **45**  | 108    | 71     |
-| float_math   | 355         | 836        | **37**  | 84     | 44     |
-| loop_count   | 310         | 765        | **32**  | 94     | 57     |
-| prime_count  | 387         | 810        | **37**  | 75     | 42     |
-| records      | 432         | 852        | 77      | 89     | **57** |
-| sort_list    | 338         | 894        | **49**  | 153    | 72     |
-| str_concat   | 345         | 804        | 73      | 94     | **61** |
-| string_build | 351         | 814        | **34**  | 75     | 41     |
-| sum_list     | 336         | 795        | **34**  | 77     | 42     |
-| tree_sum     | 354         | 886        | **33**  | 71     | 39     |
+| closures     | 392         | 929        | **47**  | 93     | 52     |
+| collatz      | 358         | 890        | **46**  | 93     | 59     |
+| du_eval      | 385         | 993        | 132     | 176    | **97** |
+| fib30        | 341         | 766        | **43**  | 102    | 68     |
+| float_math   | 347         | 824        | **36**  | 82     | 42     |
+| loop_count   | 320         | 785        | **33**  | 89     | 56     |
+| prime_count  | 327         | 774        | **37**  | 74     | 44     |
+| records      | 343         | 907        | 71      | 86     | **57** |
+| sort_list    | 458         | 823        | **50**  | 154    | 75     |
+| str_concat   | 349         | 819        | 69      | 93     | **59** |
+| string_build | 368         | 834        | **35**  | 75     | 42     |
+| sum_list     | 374         | 799        | **36**  | 74     | 41     |
+| tree_sum     | 355         | 869        | **32**  | 70     | 39     |
 
 (MSYS2, gcc 15, .NET 9; milliseconds, best of 3.) fss wins 10 of 13 against
-F# NativeAOT and all 13 against F# JIT; it loses on the three allocation-heavy
-programs. `bench/README.md` has the per-program descriptions.
+F# NativeAOT and all 13 against F# JIT; the three losses are the
+allocation-heavy programs, now by 1.2-1.4× instead of 5×. `bench/README.md` has the per-program descriptions.
 
 ### Why fss over F# NativeAOT?
 
@@ -338,13 +340,15 @@ programs. `bench/README.md` has the per-program descriptions.
 
 ### Where fss still loses
 
-Allocation-heavy code is the honest gap: `du_eval` (25M short-lived union
-nodes) is ~5× slower than F# NativeAOT, and `records`/`str_concat` ~1.2-1.35×
-slower. The runtime uses an 8 MB bump allocator with 16-byte size-class free
-lists plus a conservative mark-sweep collector — fast per allocation, but each
-collection does a full conservative scan and index rebuild, where .NET's
-generational GC has near-free gen0 collections. A younger generation (or a
-nursery bump-and-reset) is the next runtime project.
+Allocation-heavy code: `du_eval` (25M short-lived union nodes) is 132 ms vs
+97 ms for F# NativeAOT, and `records`/`str_concat` are ~1.2× slower. That gap
+used to be ~5×; the runtime now bump-allocates inside 8 MB chunks, recycles
+freed objects through 16-byte size classes with 8-byte block headers, and
+keeps a per-chunk append-only index of object starts so collections no longer
+sort the heap (`du_eval` 629 → 132 ms, `sort_list` 170 → 50 ms). .NET still
+wins because it *moves* objects and collects generationally. fss's collector
+is conservative (stack roots are ambiguous words), so it cannot move objects
+and therefore has no nursery — that is the next runtime project.
 
 ## Self-hosting goal
 

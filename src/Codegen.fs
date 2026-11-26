@@ -1030,10 +1030,45 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         "static void print_string(fsstring_t s) { fwrite(s.data, 1, (size_t)s.len, stdout); fflush(stdout); }\n" +
         "\n" +
         "// --- conservative mark-sweep garbage collector ---\n" +
-        "typedef struct fs_block { struct fs_block* next; uint32_t size; uint32_t mark; } fs_block_t;\n" +
-        "static fs_block_t* fs_heap = NULL;\n" +
+        "/* ---- allocator ---------------------------------------------------------\n" +
+        "   Objects are allocated by bumping inside 8 MB chunks. Freed objects are\n" +
+        "   recycled through 16-byte-granularity size classes. Each chunk records the\n" +
+        "   start address of every object it contains, in increasing address order, so\n" +
+        "   a pointer -> object lookup is a binary search inside one chunk: no global\n" +
+        "   index has to be rebuilt for a collection.\n" +
+        "\n" +
+        "   Block header: 8 bytes (payload size + state bits).\n" +
+        "     st bit 0: marked    (during a collection)\n" +
+        "     st bit 1: in use    (allocated, i.e. not on a free list)\n" +
+        "   A free block's payload holds the free-list link. */\n" +
+        "/* ---- allocator and collector -------------------------------------------\n" +
+        "   Objects are bump-allocated inside 8 MB chunks; freed objects are recycled\n" +
+        "   through fixed-size classes (16-byte granularity). Each chunk keeps a list\n" +
+        "   of its object start addresses in increasing order, extended lazily at\n" +
+        "   collection time by walking the *new* part of the chunk (bump allocation\n" +
+        "   only ever appends, so this is a sequential scan and never a sort).\n" +
+        "\n" +
+        "   Block header is 8 bytes:\n" +
+        "     total  bytes occupied by this block (header included, multiple of 16)\n" +
+        "     st     bit 0 = marked, bit 1 = in use\n" +
+        "   A free block's payload holds the free-list link; `total` always stays\n" +
+        "   valid, so the chunk can be walked without trusting the allocator state. */\n" +
+        "typedef struct fs_block { uint32_t total; uint32_t st; } fs_block_t;\n" +
+        "\n" +
+        "typedef struct fs_chunk {\n" +
+        "    char* start;\n" +
+        "    char* end;\n" +
+        "    char* top;          /* high-water mark of bump allocation */\n" +
+        "    char* indexed;      /* blocks up to here are in `blocks` */\n" +
+        "    fs_block_t** blocks;\n" +
+        "    int n, cap;\n" +
+        "    struct fs_chunk* next;\n" +
+        "} fs_chunk_t;\n" +
+        "\n" +
+        "typedef struct { void* addr; size_t size; } fs_root_t;\n" +
+        "\n" +
         "static size_t fs_live = 0;\n" +
-        "static struct { void* addr; size_t size; } fs_roots[1024];\n" +
+        "static fs_root_t fs_roots[1024];\n" +
         "static int fs_root_count = 0;\n" +
         "static void* fs_stack_bottom = NULL;\n" +
         "static fs_block_t* fs_work[65536];\n" +
@@ -1041,43 +1076,65 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         "static const size_t fs_threshold = 64 * 1024 * 1024;\n" +
         "#define FS_CLASSES 512\n" +
         "static fs_block_t* fs_free_buckets[FS_CLASSES];\n" +
+        "static fs_chunk_t* fs_chunks = NULL;\n" +
+        "static fs_chunk_t* fs_chunk_cur = NULL;\n" +
         "static char* fs_bump = NULL;\n" +
-        "static char* fs_bump_end = NULL;\n" +
         "#define FS_CHUNK (8 * 1024 * 1024)\n" +
-        "static int fs_class_of(size_t total) { size_t c = (total + 15) >> 4; return c < FS_CLASSES ? (int)c : FS_CLASSES - 1; }\n" +
+        "#define FS_HDR ((size_t)sizeof(fs_block_t))\n" +
+        "\n" +
+        "static int fs_class_of(size_t total) {\n" +
+        "    size_t c = (total + 15) >> 4;\n" +
+        "    return c < FS_CLASSES ? (int)c : FS_CLASSES - 1;\n" +
+        "}\n" +
         "\n" +
         "static void fs_gc_init(void* anchor) { fs_stack_bottom = anchor; }\n" +
+        "\n" +
         "static void fs_add_root(void* var_addr, size_t size) {\n" +
         "    if (fs_root_count < 1024) { fs_roots[fs_root_count].addr = var_addr; fs_roots[fs_root_count].size = size; fs_root_count++; }\n" +
         "}\n" +
         "\n" +
-        "static fs_block_t** fs_sorted = NULL;\n" +
-        "static int fs_sorted_n = 0;\n" +
-        "\n" +
-        "static int fs_block_cmp(const void* a, const void* b) {\n" +
-        "    fs_block_t* x = *(fs_block_t**)a;\n" +
-        "    fs_block_t* y = *(fs_block_t**)b;\n" +
-        "    return (char*)x < (char*)y ? -1 : ((char*)x > (char*)y ? 1 : 0);\n" +
+        "static void fs_chunk_new(size_t cap) {\n" +
+        "    fs_chunk_t* c = (fs_chunk_t*)malloc(sizeof(fs_chunk_t));\n" +
+        "    c->start = (char*)malloc(cap);\n" +
+        "    c->end = c->start + cap;\n" +
+        "    c->top = c->start;\n" +
+        "    c->indexed = c->start;\n" +
+        "    c->blocks = NULL;\n" +
+        "    c->n = 0; c->cap = 0;\n" +
+        "    c->next = fs_chunks;\n" +
+        "    fs_chunks = c;\n" +
+        "    fs_chunk_cur = c;\n" +
+        "    fs_bump = c->start;\n" +
         "}\n" +
         "\n" +
-        "static void fs_build_index(void) {\n" +
-        "    int n = 0;\n" +
-        "    for (fs_block_t* b = fs_heap; b; b = b->next) n++;\n" +
-        "    fs_sorted = (fs_block_t**)realloc(fs_sorted, sizeof(fs_block_t*) * (size_t)n);\n" +
-        "    int i = 0;\n" +
-        "    for (fs_block_t* b = fs_heap; b; b = b->next) fs_sorted[i++] = b;\n" +
-        "    qsort(fs_sorted, (size_t)n, sizeof(fs_block_t*), fs_block_cmp);\n" +
-        "    fs_sorted_n = n;\n" +
+        "/* Extend every chunk's block list over the region allocated since the last\n" +
+        "   collection. Sequential, amortised one step per allocation. */\n" +
+        "static void fs_chunk_index(void) {\n" +
+        "    for (fs_chunk_t* c = fs_chunks; c != NULL; c = c->next) {\n" +
+        "        while (c->indexed + FS_HDR <= c->top) {\n" +
+        "            fs_block_t* b = (fs_block_t*)c->indexed;\n" +
+        "            if (c->n == c->cap) {\n" +
+        "                c->cap = c->cap ? c->cap * 2 : 1024;\n" +
+        "                c->blocks = (fs_block_t**)realloc(c->blocks, sizeof(fs_block_t*) * (size_t)c->cap);\n" +
+        "            }\n" +
+        "            c->blocks[c->n++] = b;\n" +
+        "            c->indexed += (size_t)b->total;\n" +
+        "        }\n" +
+        "    }\n" +
         "}\n" +
         "\n" +
         "static fs_block_t* fs_find_block(void* p) {\n" +
-        "    int lo = 0, hi = fs_sorted_n - 1;\n" +
+        "    fs_chunk_t* c = fs_chunks;\n" +
+        "    while (c != NULL && !((char*)p >= c->start && (char*)p < c->top)) c = c->next;\n" +
+        "    if (c == NULL) return NULL;\n" +
+        "    int lo = 0, hi = c->n - 1;\n" +
         "    while (lo <= hi) {\n" +
         "        int mid = lo + (hi - lo) / 2;\n" +
-        "        char* start = (char*)(fs_sorted[mid] + 1);\n" +
+        "        fs_block_t* b = c->blocks[mid];\n" +
+        "        char* start = (char*)(b + 1);\n" +
         "        if ((char*)p < start) hi = mid - 1;\n" +
-        "        else if ((char*)p >= start + fs_sorted[mid]->size) lo = mid + 1;\n" +
-        "        else return fs_sorted[mid];\n" +
+        "        else if ((char*)p >= (char*)b + b->total) lo = mid + 1;\n" +
+        "        else return (b->st & 2u) ? b : NULL;\n" +
         "    }\n" +
         "    return NULL;\n" +
         "}\n" +
@@ -1085,12 +1142,12 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         "static void fs_mark_ptr(void* p) {\n" +
         "    if (p == NULL) return;\n" +
         "    fs_block_t* b = fs_find_block(p);\n" +
-        "    if (b != NULL && !b->mark) { b->mark = 1; fs_work[fs_work_n++] = b; }\n" +
+        "    if (b != NULL && !(b->st & 1u)) { b->st |= 1u; fs_work[fs_work_n++] = b; }\n" +
         "}\n" +
         "\n" +
-        "static void fs_scan_block(fs_block_t* b) {\n" +
-        "    char* start = (char*)(b + 1);\n" +
-        "    for (char* q = start; q + sizeof(void*) <= start + b->size; q += sizeof(void*)) {\n" +
+        "static void fs_scan_range(void* base, size_t size) {\n" +
+        "    char* start = (char*)base;\n" +
+        "    for (char* q = start; q + sizeof(void*) <= start + size; q += sizeof(void*)) {\n" +
         "        void* candidate;\n" +
         "        memcpy(&candidate, q, sizeof(void*));\n" +
         "        fs_mark_ptr(candidate);\n" +
@@ -1099,63 +1156,61 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         "\n" +
         "static void fs_gc(void) {\n" +
         "    __builtin_unwind_init();\n" +
-        "    fs_build_index();\n" +
         "    fs_work_n = 0;\n" +
-        "    for (int i = 0; i < fs_root_count; i++) {\n" +
-        "        char* rs = (char*)fs_roots[i].addr;\n" +
-        "        for (char* q = rs; q + sizeof(void*) <= rs + fs_roots[i].size; q += sizeof(void*)) {\n" +
-        "            void* candidate;\n" +
-        "            memcpy(&candidate, q, sizeof(void*));\n" +
-        "            fs_mark_ptr(candidate);\n" +
-        "        }\n" +
-        "    }\n" +
+        "    fs_chunk_index();\n" +
+        "\n" +
+        "    for (int i = 0; i < fs_root_count; i++) fs_scan_range(fs_roots[i].addr, fs_roots[i].size);\n" +
+        "\n" +
         "    void* sp_marker = NULL;\n" +
         "    void* sp = &sp_marker;\n" +
         "    char* lo = (char*)sp < (char*)fs_stack_bottom ? (char*)sp : (char*)fs_stack_bottom;\n" +
         "    char* hi = (char*)sp < (char*)fs_stack_bottom ? (char*)fs_stack_bottom : (char*)sp;\n" +
-        "    for (char* q = lo; q + sizeof(void*) <= hi; q += sizeof(void*)) {\n" +
-        "        void* candidate;\n" +
-        "        memcpy(&candidate, q, sizeof(void*));\n" +
-        "        fs_mark_ptr(candidate);\n" +
-        "    }\n" +
+        "    fs_scan_range(lo, (size_t)(hi - lo));\n" +
+        "\n" +
         "    while (fs_work_n > 0) {\n" +
         "        fs_block_t* b = fs_work[--fs_work_n];\n" +
-        "        fs_scan_block(b);\n" +
+        "        fs_scan_range(b + 1, (size_t)b->total - FS_HDR);\n" +
         "    }\n" +
-        "    fs_block_t** pp = &fs_heap;\n" +
+        "\n" +
         "    fs_live = 0;\n" +
-        "    while (*pp) {\n" +
-        "        fs_block_t* b = *pp;\n" +
-        "        if (b->mark) { b->mark = 0; fs_live += b->size; pp = &b->next; }\n" +
-        "        else { *pp = b->next; int c = fs_class_of(sizeof(fs_block_t) + b->size); b->next = fs_free_buckets[c]; fs_free_buckets[c] = b; }\n" +
+        "    for (fs_chunk_t* c = fs_chunks; c != NULL; c = c->next) {\n" +
+        "        for (int i = 0; i < c->n; i++) {\n" +
+        "            fs_block_t* b = c->blocks[i];\n" +
+        "            if (!(b->st & 2u)) continue;\n" +
+        "            if (b->st & 1u) { b->st = 2u; fs_live += (size_t)b->total - FS_HDR; }\n" +
+        "            else {\n" +
+        "                b->st = 0u;\n" +
+        "                int cl = fs_class_of(b->total);\n" +
+        "                *(fs_block_t**)(b + 1) = fs_free_buckets[cl];\n" +
+        "                fs_free_buckets[cl] = b;\n" +
+        "            }\n" +
+        "        }\n" +
         "    }\n" +
         "}\n" +
         "\n" +
         "static void* fs_alloc(size_t n) {\n" +
         "    if (fs_live + n > fs_threshold) fs_gc();\n" +
-        "    size_t total = sizeof(fs_block_t) + n;\n" +
-        "    int c = fs_class_of(total);\n" +
+        "    size_t need = FS_HDR + n;\n" +
+        "    int c = fs_class_of(need);\n" +
         "    fs_block_t* b = fs_free_buckets[c];\n" +
-        "    if (b != NULL && b->size >= n) {\n" +
-        "        fs_free_buckets[c] = b->next;\n" +
-        "        b->mark = 0; b->next = fs_heap; fs_heap = b;\n" +
-        "        fs_live += b->size;\n" +
+        "    if (b != NULL && (size_t)b->total >= need) {\n" +
+        "        fs_free_buckets[c] = *(fs_block_t**)(b + 1);\n" +
+        "        b->st = 2u;\n" +
+        "        fs_live += (size_t)b->total - FS_HDR;\n" +
         "        return (void*)(b + 1);\n" +
         "    }\n" +
-        "    total = (size_t)c << 4;\n" +
-        "    if (total < sizeof(fs_block_t) + n) total = (sizeof(fs_block_t) + n + 15) & ~(size_t)15;\n" +
-        "    if (fs_bump == NULL || fs_bump + total > fs_bump_end) {\n" +
-        "        fs_bump = (char*)malloc(FS_CHUNK);\n" +
-        "        if (fs_bump == NULL) { fs_gc(); fs_bump = (char*)malloc(FS_CHUNK); }\n" +
-        "        fs_bump_end = fs_bump + FS_CHUNK;\n" +
-        "    }\n" +
+        "    size_t total = (size_t)c << 4;\n" +
+        "    if (total < need) total = (need + 15) & ~(size_t)15;\n" +
+        "    if (fs_bump == NULL || fs_bump + total > fs_chunk_cur->end) fs_chunk_new(total > FS_CHUNK ? total : FS_CHUNK);\n" +
         "    b = (fs_block_t*)fs_bump;\n" +
         "    fs_bump += total;\n" +
-        "    b->size = n; b->mark = 0; b->next = fs_heap; fs_heap = b;\n" +
+        "    fs_chunk_cur->top = fs_bump;\n" +
+        "    b->total = (uint32_t)total;\n" +
+        "    b->st = 2u;\n" +
         "    fs_live += n;\n" +
         "    return (void*)(b + 1);\n" +
         "}\n" +
-        "\n" +
+        "" +
         "static bool fs_str_eq(fsstring_t a, fsstring_t b) {\n" +
         "    return a.len == b.len && (a.len == 0 || memcmp(a.data, b.data, (size_t)a.len) == 0);\n" +
         "}\n" +
