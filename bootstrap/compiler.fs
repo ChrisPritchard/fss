@@ -128,6 +128,15 @@ let rec unescape s i n =
                else str_sub s i 1 + unescape s (i + 1) n)
           else str_sub s i 1 + unescape s (i + 1) n)
 
+let rec skipAttr s i n depth =
+    if i >= n then failwith "unterminated attribute"
+    else (let c = str_get s i in
+          let c2 = if i + 1 < n then str_get s (i + 1) else 0 in
+          if c = 91 && c2 = 60 then skipAttr s (i + 2) n (depth + 1)
+          elif c = 62 && c2 = 93 then
+              (if depth = 1 then i + 2 else skipAttr s (i + 2) n (depth - 1))
+          else skipAttr s (i + 1) n depth)
+
 let rec lexRev s i n acc =
     let j = skip s i n false in
     if j >= n then TEnd :: acc
@@ -143,6 +152,9 @@ let rec lexRev s i n acc =
              (let k = scanStr s (j + 1) n in
               lexRev s k n (TkStr (unescape s (j + 1) (k - 1)) :: acc))
          elif c = 10 then lexRev s (j + 1) n (TSep :: acc)
+         elif c = 91 && j + 1 < n && str_get s (j + 1) = 60 then
+             (let k = skipAttr s (j + 2) n 1 in
+              lexRev s k n acc)
          else
              (let c2 = if j + 1 < n then str_get s (j + 1) else 0 in
               if c = 60 && c2 = 61 then lexRev s (j + 2) n (TSym "<=" :: acc)
@@ -186,6 +198,29 @@ let rec diff xs ys =
     match xs with
     | [] -> []
     | h :: t -> if mem h ys then diff t ys else h :: diff t ys
+
+// --- .NET namespace aliases (for F# drop-in compatibility) ---
+
+let namespaceRoots = ["System"; "Console"; "IO"; "File"; "Math"; "Collections"; "Text"; "Threading"; "Linq"; "Diagnostics"; "Runtime"]
+
+let isNamespaceRoot x = mem x namespaceRoots
+
+let rec parseDottedName toks acc =
+    match toks with
+    | TSym "." :: TIdent n :: r -> parseDottedName r (acc + "." + n)
+    | _ -> (acc, toks)
+
+let aliasValue full =
+    if full = "System.Console.WriteLine" || full = "Console.WriteLine" then Some "println"
+    elif full = "System.Console.Write" || full = "Console.Write" then Some "print_string"
+    elif full = "System.IO.File.ReadAllText" || full = "File.ReadAllText" then Some "read_file"
+    else None
+
+let aliasType full =
+    if full = "System.String" then Some TStr
+    elif full = "System.Int32" then Some TInt
+    elif full = "System.Boolean" then Some TBool
+    else None
 
 // --- type declarations ---
 
@@ -231,7 +266,14 @@ and parseTypeAtom toks =
         (match parseType r with
          | (t, TSym ")" :: r2) -> (t, r2)
          | _ -> failwith "expected ')'")
-    | TIdent n :: r -> (TNamed n, r)
+    | TIdent n :: r ->
+        if isNamespaceRoot n then
+            (match parseDottedName r n with
+             | (full, rest) ->
+                 (match aliasType full with
+                  | Some t -> (t, rest)
+                  | None -> (TNamed full, rest)))
+        else (TNamed n, r)
     | _ -> failwith "bad type"
 
 let rec parseTypeDecls toks =
@@ -403,6 +445,17 @@ and parseAtom toks =
     | TIdent "not" :: r ->
         (match parseAtom r with
          | (e, r2) -> (EBin ("=", e, EBool false), r2))
+    | TIdent x :: TSym "." :: r ->
+        if isNamespaceRoot x then
+            (match r with
+             | TIdent n :: rest ->
+                 (match parseDottedName rest (x + "." + n) with
+                  | (full, rest2) ->
+                      (match aliasValue full with
+                       | Some b -> (EVar b, rest2)
+                       | None -> (EVar full, rest2)))
+             | _ -> (EVar x, TSym "." :: r))
+        else (EVar x, TSym "." :: r)
     | TIdent x :: r -> (EVar x, r)
     | TSym "-" :: r ->
         (match parseAtom r with
@@ -487,7 +540,22 @@ and parseParams toks =
     | TIdent p :: r ->
         (match parseParams r with
          | (ps, rest) -> (p :: ps, rest))
+    | TSym "(" :: TIdent p :: r ->
+        (match skipTypeAnn r with
+         | rest ->
+             (match rest with
+              | TSym ")" :: r2 ->
+                  (match parseParams r2 with
+                   | (ps, r3) -> (p :: ps, r3))
+              | _ -> failwith "expected ')' in parameter"))
     | _ -> ([], toks)
+
+and skipTypeAnn toks =
+    match toks with
+    | TSym ":" :: r ->
+        (match parseType r with
+         | (_, rest) -> rest)
+    | _ -> toks
 
 and wrapLambdas params body =
     match params with
@@ -511,6 +579,12 @@ and parseRecGroup toks members acc =
 and parseDefs toks acc =
     match toks with
     | TSep :: r -> parseDefs r acc
+    | TIdent "open" :: TIdent n :: r ->
+        (match parseDottedName r n with
+         | (_, rest) -> parseDefs rest acc)
+    | TIdent "let" :: TIdent "main" :: TSym "(" :: TSym ")" :: TSym "=" :: r ->
+        (match parseExpr (skipSeps r) with
+         | (body, rest) -> parseDefs rest (Def ("main", false, false, EFun ("_", body)) :: acc))
     | TIdent "let" :: TIdent "rec" :: TIdent name :: r ->
         (match parseParams r with
          | (params, TSym "=" :: r2) ->
@@ -748,6 +822,7 @@ let builtinEnv =
     ; ("print_bool", Scheme ([], TFun (TBool, TUnit)))
     ; ("print_newline", Scheme ([], TFun (TUnit, TUnit)))
     ; ("print_string", Scheme ([], TFun (TStr, TUnit)))
+    ; ("println", Scheme ([], TFun (TStr, TUnit)))
     ; ("str_len", Scheme ([], TFun (TStr, TInt)))
     ; ("str_get", Scheme ([], TFun (TStr, TFun (TInt, TInt))))
     ; ("str_sub", Scheme ([], TFun (TStr, TFun (TInt, TFun (TInt, TStr)))))
@@ -1782,6 +1857,7 @@ let runtimePre =
         "static int32_t print_int(int32_t x) { printf(\"%d\", x); return 0; }\n" +
         "static int32_t print_bool(bool b) { fputs(b ? \"true\" : \"false\", stdout); return 0; }\n" +
         "static int32_t print_string(fsstring_t s) { fwrite(s.data, 1, (size_t)s.len, stdout); return 0; }\n" +
+        "static int32_t println(fsstring_t s) { fwrite(s.data, 1, (size_t)s.len, stdout); fputc('\\n', stdout); return 0; }\n" +
         "static int32_t print_newline(int32_t u) { fputc('\\n', stdout); return 0; }\n" +
         "static int32_t str_len(fsstring_t s) { return s.len; }\n" +
         "static int32_t str_get(fsstring_t s, int32_t i) { if (i < 0 || i >= s.len) { fputs(\"str_get: index out of range\\n\", stderr); exit(1); } return (int32_t)(unsigned char)s.data[i]; }\n" +
@@ -1843,7 +1919,7 @@ let emitProgram tds te rt =
     let vinits = emitValInits scope0 tds in
     runtimePre + typedefs + eqFwds + fwds + vdecls + thunks + fdefs + eqBuf + "int main(void) {\n    " + vinits + body + "\n    return 0;\n}\n")
 
-let emitMainProgram tds =
+let rec emitMainProgram tds =
     let scope0 = scopeOf tds in
     (funNames <- funNamesOf tds;
      emitUnionFwds 0;
@@ -1864,9 +1940,19 @@ let emitMainProgram tds =
      "        " + ln + "* n = (" + ln + "*)malloc(sizeof(" + ln + "));\n" +
      "        n->head = s; n->tail = args; args = n;\n" +
      "    }\n" +
-     "    v_main(args);\n" +
+     "    " + mainCall tds + "\n" +
      "    return 0;\n" +
      "}\n")
+
+and mainCall tds =
+    match mainTy tds with
+    | TFun (TUnit, _) -> "v_main(0);"
+    | _ -> "v_main(args);"
+
+and mainTy tds =
+    match tds with
+    | [] -> TUnit
+    | TDef (n, sc, _) :: rest -> if n = "main" then prune (schemeBody sc) else mainTy rest
 
 let rec hasMain defs =
     match defs with

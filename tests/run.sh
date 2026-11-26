@@ -211,6 +211,27 @@ if [ -x build/cases/bootstrap_compiler ] || [ -x build/cases/bootstrap_compiler.
         head -3 build/cases/self_compiler.err
         fail=$((fail + 1))
     fi
+
+    # F#-compat: the self-hosted compiler handles attributes, namespaces,
+    # type annotations, and `let main () = ...`.
+    if "$sbin" tests/selfhost_compat.fs > build/cases/self_compat.c 2>build/cases/self_compat.err \
+        && cc -O1 build/cases/self_compat.c -o build/cases/self_compat >/dev/null 2>&1; then
+        ccbin=build/cases/self_compat
+        [ -f build/cases/self_compat.exe ] && ccbin=build/cases/self_compat.exe
+        "$ccbin" | tr -d '\r' > build/cases/self_compat.actual
+        if diff -u tests/selfhost_compat.expected build/cases/self_compat.actual >/dev/null; then
+            echo "PASS  selfhost/compat"
+            pass=$((pass + 1))
+        else
+            echo "FAIL  selfhost/compat (output)"
+            diff -u tests/selfhost_compat.expected build/cases/self_compat.actual || true
+            fail=$((fail + 1))
+        fi
+    else
+        echo "FAIL  selfhost/compat (compile)"
+        head -3 build/cases/self_compat.err
+        fail=$((fail + 1))
+    fi
 fi
 
 # Negative cases: must fail with a type error or a clear error message.
