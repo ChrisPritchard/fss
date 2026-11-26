@@ -59,7 +59,9 @@ type TProgram =
       MainArg: string option
       Externs: (string * (string * Ty) list * Ty) list
       Includes: string list
-      Links: string list }
+      Links: string list
+      Exports: (string * string) list
+      Library: bool }
 
 let rec tyOf (e: TExpr) : Ty =
     match e with
@@ -213,6 +215,11 @@ let private builtinEnv : Map<string, Binding> =
         "double_to_string", { Scheme = Scheme([], FunTy(DoubleTy, StringTy)); Mutable = false }
         "int_to_double", { Scheme = Scheme([], FunTy(IntTy, DoubleTy)); Mutable = false }
         "double_to_int", { Scheme = Scheme([], FunTy(DoubleTy, IntTy)); Mutable = false }
+        "cstring_of_string", { Scheme = Scheme([], FunTy(StringTy, CStrTy)); Mutable = false }
+        "string_of_cstring", { Scheme = Scheme([], FunTy(CStrTy, StringTy)); Mutable = false }
+        "cstring_null", { Scheme = Scheme([], FunTy(UnitTy, CStrTy)); Mutable = false }
+        "cstring_is_null", { Scheme = Scheme([], FunTy(CStrTy, BoolTy)); Mutable = false }
+        "cstring_len", { Scheme = Scheme([], FunTy(CStrTy, IntTy)); Mutable = false }
     ]
 
 let private buildCaseInfo (types: (string * TypeDef) list) : Map<string, string * Ty> =
@@ -396,8 +403,11 @@ let rec private infer (env: Map<string, Binding>) (typeDefs: Map<string, TypeDef
             | (lt, _) :: _ -> lt
         (t, TSeq(t, List.map snd txs))
 
-    | Fun (param, body) ->
+    | Fun (param, ann, body) ->
         let pt = freshVar ()
+        match ann with
+        | Some t -> unify pt t
+        | None -> ()
         let (bt, btExpr) = infer (Map.add param { Scheme = Scheme([], pt); Mutable = false } env) typeDefs caseInfo body
         (FunTy(pt, bt), TFun(param, FunTy(pt, bt), btExpr))
 
@@ -666,7 +676,7 @@ let check (prog: Program) : TProgram =
 
     let rec loop (env: Map<string, Binding>) (consts: (string * Scheme * TExpr * bool) list) (externs: (string * (string * Ty) list * Ty) list) (main: TExpr option) (mainArg: string option) : (Def list -> TProgram) =
         function
-        | [] -> { Types = typeDefs; Ctors = caseInfo; Consts = List.rev consts; Main = main; MainArg = mainArg; Externs = List.rev externs; Includes = prog.Includes; Links = prog.Links }
+        | [] -> { Types = typeDefs; Ctors = caseInfo; Consts = List.rev consts; Main = main; MainArg = mainArg; Externs = List.rev externs; Includes = prog.Includes; Links = prog.Links; Exports = prog.Exports; Library = false }
         | Const (n, e) :: rest ->
             let (t, te) = infer env typeDefs caseInfo e
             if prune t = UnitTy then err ("top-level binding '" + n + "' must not have type unit")
@@ -728,5 +738,6 @@ let check (prog: Program) : TProgram =
             loop env consts externs (Some tb) arg rest
 
     let tprog = loop env0 [] [] None None prog.Defs
-    if tprog.Main.IsNone then err "no entry point: expected 'let main () = ...'"
-    tprog
+    let isLibrary = not (List.isEmpty prog.Exports)
+    if tprog.Main.IsNone && not isLibrary then err "no entry point: expected 'let main () = ...'"
+    { tprog with Library = isLibrary }

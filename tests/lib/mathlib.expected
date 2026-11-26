@@ -1,0 +1,5 @@
+add(2,3)=5
+fib(20)=6765
+sumTo(100)=5050
+greet=hello, world!
+hyp=5

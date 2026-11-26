@@ -12,7 +12,9 @@ type Program =
       MainArg: string option
       Externs: (string * (string * Ty) list * Ty) list
       Includes: string list
-      Links: string list }
+      Links: string list
+      Exports: (string * string) list
+      Library: bool }
 
 let monomorphize (tprog: TProgram) : Program =
     let schemes = Map.ofList (tprog.Consts |> List.map (fun (n, s, _, _) -> n, s))
@@ -125,4 +127,6 @@ let monomorphize (tprog: TProgram) : Program =
       MainArg = tprog.MainArg
       Externs = tprog.Externs
       Includes = tprog.Includes
-      Links = tprog.Links }
+      Links = tprog.Links
+      Exports = tprog.Exports
+      Library = tprog.Library }

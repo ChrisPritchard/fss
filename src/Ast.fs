@@ -7,6 +7,7 @@ type Ty =
     | UnitTy
     | StringTy
     | DoubleTy
+    | CStrTy        // `char*` — a NUL-terminated C string
     | FunTy of Ty * Ty
     | TyVar of int
     | TNamed of string * Ty list   // records, DUs, list, option
@@ -19,6 +20,7 @@ let rec tyToString (t: Ty) : string =
     | UnitTy -> "unit"
     | StringTy -> "string"
     | DoubleTy -> "double"
+    | CStrTy -> "cstring"
     | TyVar n -> "'a" + string n
     | FunTy (a, b) -> "(" + tyToString a + " -> " + tyToString b + ")"
     | TNamed (n, []) -> n
@@ -39,7 +41,7 @@ type UnaryOp =
     | Not
 
 /// Builtin effectful functions, seeded into the initial environment.
-let builtinNames = [ "print_int"; "print_bool"; "print_newline"; "print_string"; "println"; "str_len"; "int_to_string"; "bool_to_string"; "read_line"; "read_file"; "write_file"; "str_get"; "str_sub"; "int_of_string"; "print_double"; "double_to_string"; "int_to_double"; "double_to_int" ]
+let builtinNames = [ "print_int"; "print_bool"; "print_newline"; "print_string"; "println"; "str_len"; "int_to_string"; "bool_to_string"; "read_line"; "read_file"; "write_file"; "str_get"; "str_sub"; "int_of_string"; "print_double"; "double_to_string"; "int_to_double"; "double_to_int"; "cstring_of_string"; "string_of_cstring"; "cstring_null"; "cstring_is_null"; "cstring_len" ]
 
 /// Patterns (used in match arms).
 type Pattern =
@@ -71,7 +73,7 @@ type Expr =
     | Assign of string * Expr              // x <- e
     | While of Expr * Expr                 // while e1 do e2
     | Seq of Expr list                     // e1; e2; ... (value is last)
-    | Fun of string * Expr                 // fun x -> e
+    | Fun of string * Ty option * Expr     // fun x -> e  (optional parameter annotation)
     | Apply of Expr * Expr                 // f a
     | Tuple of Expr list                   // (e1, e2, ...)
     | Record of Expr option * (string * Expr) list   // { ... } / { e with ... }
@@ -97,7 +99,14 @@ type Def =
     | Main of string option * Expr  // let main () = expr | let main argv = expr
     | Extern of string * (string * Ty) list * Ty  // extern name(p1: t1, ...) : ret
 
-type Program = { Types: (string * TypeDef) list; Defs: Def list; Opens: string list; Includes: string list; Links: string list }
+type Program =
+    { Types: (string * TypeDef) list
+      Defs: Def list
+      Opens: string list
+      Includes: string list
+      Links: string list
+      /// (fss name, C symbol name) pairs marked `[<Export>]`.
+      Exports: (string * string) list }
 
 /// Pretty-printer, used in tests and error messages.
 let rec exprToString (e: Expr) : string =
@@ -123,7 +132,7 @@ let rec exprToString (e: Expr) : string =
     | Assign (n, e) -> sprintf "(%s <- %s)" n (exprToString e)
     | While (c, b) -> sprintf "(while %s do %s)" (exprToString c) (exprToString b)
     | Seq xs -> xs |> List.map exprToString |> String.concat "; " |> sprintf "(seq %s)"
-    | Fun (p, b) -> sprintf "(fun %s -> %s)" p (exprToString b)
+    | Fun (p, _, b) -> sprintf "(fun %s -> %s)" p (exprToString b)
     | Apply (f, a) -> sprintf "(%s %s)" (exprToString f) (exprToString a)
     | Tuple xs -> "(" + (xs |> List.map exprToString |> String.concat ", ") + ")"
     | Record (baseE, fields) ->

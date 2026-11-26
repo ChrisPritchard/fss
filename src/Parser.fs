@@ -2,7 +2,7 @@ module Fss.Parser
 
 open Fss.Ast
 
-type P = { Toks: Lexer.Token array; mutable Idx: int; mutable Opens: string list; mutable Includes: string list; mutable Links: string list }
+type P = { Toks: Lexer.Token array; mutable Idx: int; mutable Opens: string list; mutable Includes: string list; mutable Links: string list; mutable Exports: (string * string) list }
 
 let peek (p: P) : Lexer.Token = p.Toks.[p.Idx]
 
@@ -116,6 +116,8 @@ and parseTypeAtom (p: P) : Ty =
     | Lexer.Ident "unit" -> advance p |> ignore; UnitTy
     | Lexer.Ident "string" -> advance p |> ignore; StringTy
     | Lexer.Ident "double" -> advance p |> ignore; DoubleTy
+    | Lexer.Ident "cstring" -> advance p |> ignore; CStrTy
+    | Lexer.Ident "char*" -> advance p |> ignore; CStrTy
     | Lexer.Ident "void" -> advance p |> ignore; UnitTy
     | Lexer.Ident _ ->
         let name = parseDottedName p
@@ -161,21 +163,26 @@ let parseTypeDecl (p: P) : (string * TypeDef) =
             (name, UnionDef(casesLoop []))
     | k -> failwith ("line " + string (peek p).Line + ": expected type name, found " + Lexer.tokKindName k)
 
-/// Parse one function parameter: a bare name, or `(name : Type)` where the
-/// type annotation is read and discarded (fss has no type annotations yet).
-let parseParam (p: P) : string =
+/// Parse one function parameter: a bare name, or `(name : Type)`. The
+/// annotation is passed through and used as a type constraint.
+let parseParam (p: P) : string * Ty option =
     match (peek p).Kind with
-    | Lexer.Ident name -> advance p |> ignore; name
+    | Lexer.Ident name -> advance p |> ignore; (name, None)
     | Lexer.LParen ->
         advance p |> ignore
         match (peek p).Kind with
         | Lexer.Ident name ->
             advance p |> ignore
-            if (peek p).Kind = Lexer.Colon then
-                advance p |> ignore
-                parseType p |> ignore
+            let ann =
+                if (peek p).Kind = Lexer.Colon then
+                    advance p |> ignore
+                    let t = parseType p
+                    if (peek p).Kind = Lexer.Star then
+                        failwith ("line " + string (peek p).Line + ": only single-parameter type annotations are supported")
+                    Some t
+                else None
             expect p Lexer.RParen
-            name
+            (name, ann)
         | k -> failwith ("line " + string (peek p).Line + ": expected parameter name, found " + Lexer.tokKindName k)
     | k -> failwith ("line " + string (peek p).Line + ": expected parameter, found " + Lexer.tokKindName k)
 
@@ -312,7 +319,7 @@ and parseStmt (p: P) : Expr =
                 let fnBody = parseStmt p
                 expect p Lexer.In
                 let body = parseStmt p
-                let fn = List.foldBack (fun pn b -> Fun(pn, b)) ps fnBody
+                let fn = List.foldBack (fun (pn, an) b -> Fun(pn, an, b)) ps fnBody
                 if recFlag then LetRec(name, fn, body)
                 else Let(name, fn, body)
         | k -> failwith ("line " + string (peek p).Line + ": expected name after 'let', found " + Lexer.tokKindName k)
@@ -498,7 +505,7 @@ and parsePrimary (p: P) : Expr =
             advance p |> ignore
             expect p Lexer.Arrow
             let body = parseStmt p
-            Fun(pn, body)
+            Fun(pn, None, body)
         | k -> failwith ("line " + string (peek p).Line + ": expected parameter name after 'fun', found " + Lexer.tokKindName k)
     | Lexer.LParen ->
         advance p |> ignore
@@ -635,7 +642,7 @@ let parseDef (p: P) : Def =
             if name = "main" && not recFlag then
                 match ps with
                 | [] -> Main(None, body)
-                | [ pname ] -> Main(Some pname, body)
+                | [ (pname, _) ] -> Main(Some pname, body)
                 | _ -> failwith ("line " + string (peek p).Line + ": 'main' takes at most one argument")
             elif recFlag then
                 let rec andLoop acc =
@@ -648,26 +655,32 @@ let parseDef (p: P) : Def =
                             if List.isEmpty bps then failwith ("line " + string (peek p).Line + ": expected parameters")
                             expect p Lexer.Eq
                             let bbody = parseStmt p
-                            let bfn = List.foldBack (fun pn b -> Fun(pn, b)) bps bbody
+                            let bfn = List.foldBack (fun (pn, an) b -> Fun(pn, an, b)) bps bbody
                             andLoop ((bn, bfn) :: acc)
                         | k -> failwith ("line " + string (peek p).Line + ": expected name after 'and', found " + Lexer.tokKindName k)
                     else List.rev acc
-                (let group = (name, List.foldBack (fun pn b -> Fun(pn, b)) ps body) :: andLoop []
+                (let group = (name, List.foldBack (fun (pn, an) b -> Fun(pn, an, b)) ps body) :: andLoop []
                  match group with
                  | [ (n, f) ] -> ConstRec(n, f)
                  | _ -> RecGroup group)
             else
-                let fn = List.foldBack (fun pn b -> Fun(pn, b)) ps body
+                let fn = List.foldBack (fun (pn, an) b -> Fun(pn, an, b)) ps body
                 Const(name, fn)
     | k -> failwith ("line " + string (peek p).Line + ": expected name after 'let', found " + Lexer.tokKindName k)
 
 let parse (src: string) : Program =
     let toks = Lexer.layout (Lexer.tokenize src)
-    let p = { Toks = Array.ofList toks; Idx = 0; Opens = []; Includes = []; Links = [] }
+    let p = { Toks = Array.ofList toks; Idx = 0; Opens = []; Includes = []; Links = []; Exports = [] }
 
     let rec loop types defs =
         match (peek p).Kind with
-        | Lexer.EOF -> { Types = List.rev types; Defs = List.rev defs; Opens = List.rev p.Opens; Includes = List.rev p.Includes; Links = List.rev p.Links }
+        | Lexer.EOF ->
+            { Types = List.rev types
+              Defs = List.rev defs
+              Opens = List.rev p.Opens
+              Includes = List.rev p.Includes
+              Links = List.rev p.Links
+              Exports = List.rev p.Exports }
         | Lexer.Type -> loop (parseTypeDecl p :: types) defs
         | Lexer.Semi | Lexer.In -> advance p |> ignore; loop types defs
         | Lexer.Open ->
@@ -688,6 +701,17 @@ let parse (src: string) : Program =
             p.Links <- l :: p.Links
             loop types defs
         | Lexer.Extern -> loop types (parseExtern p :: defs)
+        | Lexer.ExportAttr cname ->
+            advance p |> ignore
+            let d = parseDef p
+            let names =
+                match d with
+                | Const (n, _) | ConstRec (n, _) | MutableConst (n, _) -> [ n ]
+                | RecGroup bs -> bs |> List.map fst
+                | _ -> []
+            for n in names do
+                p.Exports <- (n, (if cname = "" then n else cname)) :: p.Exports
+            loop types (d :: defs)
         | _ -> loop types (parseDef p :: defs)
 
     loop [] []

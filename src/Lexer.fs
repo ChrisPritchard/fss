@@ -12,6 +12,7 @@ type TokKind =
     | Open | Namespace | Module | For | To | Downto
     | Extern
     | Include of string | Link of string
+    | ExportAttr of string   // `[<Export>]` / `[<Export("c_name")>]`
     | LParen | RParen | Eq | Semi
     | Plus | Minus | Star | Slash | Percent
     | Lt | Le | Gt | Ge | Ne
@@ -44,6 +45,7 @@ let tokKindName =
     | Open -> "open" | Namespace -> "namespace" | Module -> "module"
     | For -> "for" | To -> "to" | Downto -> "downto"
     | Extern -> "extern" | Include s -> "#include \"" + s + "\"" | Link s -> "#link \"" + s + "\""
+    | ExportAttr s -> "[<Export(\"" + s + "\")>]"
     | Bar -> "|" | Cons -> "::"
     | LBrace -> "{" | RBrace -> "}" | LBracket -> "[" | RBracket -> "]"
     | Colon -> ":" | Comma -> "," | Dot -> "."
@@ -139,7 +141,21 @@ let tokenize (src: string) : Token list =
                         Some(if nm = "Include" then Include v else Link v)
         match tryOne "Include" with
         | Some k -> Some k
-        | None -> tryOne "Link"
+        | None ->
+            match tryOne "Link" with
+            | Some k -> Some k
+            | None ->
+                // `[<Export>]` or `[<Export("name")>]`
+                if text.Contains("Export") then
+                    let idx = text.IndexOf("Export")
+                    let after = text.Substring(idx + 6)
+                    let q1 = after.IndexOf('"')
+                    if q1 < 0 then Some(ExportAttr "")
+                    else
+                        let q2 = after.IndexOf('"', q1 + 1)
+                        if q2 < 0 then Some(ExportAttr "")
+                        else Some(ExportAttr(after.Substring(q1 + 1, q2 - q1 - 1)))
+                else None
 
     while i < n do
         let c = src.[i]

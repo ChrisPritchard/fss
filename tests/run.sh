@@ -234,6 +234,39 @@ if [ -x build/cases/bootstrap_compiler ] || [ -x build/cases/bootstrap_compiler.
     fi
 fi
 
+# Library interop: build a fss shared library ([<Export>]), then link a C
+# program against the generated header and call into fss.
+for src in tests/lib/*.fs; do
+    name="$(basename "$src" .fs)"
+    out="build/cases/$name"
+    if ! "${FSS_CMD[@]}" build "$src" -o "$out" --lib >/dev/null 2>build/cases/lib_"$name".cerr; then
+        echo "FAIL  lib/$name (compile)"
+        cat build/cases/lib_"$name".cerr
+        fail=$((fail + 1))
+        continue
+    fi
+    lib="$out.dll"
+    [ -f "$lib" ] || lib="$out.so"
+    csrc="tests/lib/$name.c"
+    cbin="build/cases/${name}_cmain"
+    if ! cc -O2 -I build/cases -o "$cbin" "$csrc" "$lib" >build/cases/lib_"$name".clog 2>&1; then
+        echo "FAIL  lib/$name (C link)"
+        head -5 build/cases/lib_"$name".clog
+        fail=$((fail + 1))
+        continue
+    fi
+    [ -f "$cbin.exe" ] && cbin="$cbin.exe"
+    "$cbin" | tr -d '\r' > build/cases/lib_"$name".actual
+    if diff -u "tests/lib/$name.expected" build/cases/lib_"$name".actual >/dev/null; then
+        echo "PASS  lib/$name"
+        pass=$((pass + 1))
+    else
+        echo "FAIL  lib/$name (output)"
+        diff -u "tests/lib/$name.expected" build/cases/lib_"$name".actual || true
+        fail=$((fail + 1))
+    fi
+done
+
 # Negative cases: must fail with a type error or a clear error message.
 for src in tests/errors/*.fs; do
     name="$(basename "$src" .fs)"

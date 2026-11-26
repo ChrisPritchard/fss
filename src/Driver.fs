@@ -30,23 +30,35 @@ let private compileC (cc: string) (opt: string) (marchNative: bool) (links: stri
         if err <> "" then eprintfn "%s" err
         Environment.Exit 1
 
-let private runBuild (srcPaths: string list) (out: string) (keepC: bool) (cc: string) (opt: string) (marchNative: bool) : int =
+let private runBuild (srcPaths: string list) (out: string) (keepC: bool) (cc: string) (opt: string) (marchNative: bool) (library: bool) : int =
     let progs = srcPaths |> List.map (fun p -> File.ReadAllText p |> Fss.Parser.parse)
     let prog : Fss.Ast.Program =
         { Types = progs |> List.collect (fun p -> p.Types)
           Defs = progs |> List.collect (fun p -> p.Defs)
           Opens = progs |> List.collect (fun p -> p.Opens)
           Includes = progs |> List.collect (fun p -> p.Includes)
-          Links = progs |> List.collect (fun p -> p.Links) }
+          Links = progs |> List.collect (fun p -> p.Links)
+          Exports = progs |> List.collect (fun p -> p.Exports) }
     let tprog = Fss.Typer.check prog
     let mono = Fss.Mono.monomorphize tprog
-    let c = Fss.Codegen.emit mono
+    let lib = library || mono.Library
+    let c = Fss.Codegen.emitWith lib mono
     let cPath = out + ".c"
     File.WriteAllText(cPath, c)
-    compileC cc opt marchNative prog.Links cPath out
+    if lib then
+        File.WriteAllText(out + ".h", Fss.Codegen.emitHeader mono)
+    let cflags = if library then " -shared -fPIC" else ""
+    // Shared libraries get a conventional file extension.
+    let libOut =
+        if not lib then out
+        elif out.EndsWith(".dll") || out.EndsWith(".so") || out.EndsWith(".dylib") then out
+        elif System.OperatingSystem.IsWindows() then out + ".dll"
+        else out + ".so"
+    compileC cc (opt + cflags) marchNative prog.Links cPath libOut
     if not keepC then File.Delete cPath
     let exe =
-        if File.Exists(out + ".exe") then out + ".exe"
+        if File.Exists(libOut + ".exe") then libOut + ".exe"
+        elif File.Exists(libOut) then libOut
         else out
     printfn "built %s" exe
     0
@@ -65,6 +77,7 @@ let main (argv: string array) : int =
             let mutable cc = "cc"
             let mutable opt = "-O2"
             let mutable marchNative = false
+            let mutable library = false
             let mutable i = 1
             while i < argv.Length do
                 match argv.[i] with
@@ -78,6 +91,7 @@ let main (argv: string array) : int =
                         i <- i + 1
                         cc <- argv.[i]
                 | "--march-native" -> marchNative <- true
+                | "--lib" -> library <- true
                 | a when a.StartsWith("-O") -> opt <- a
                 | a ->
                     if srcPaths.IsEmpty then out <- Path.GetFileNameWithoutExtension a
@@ -85,7 +99,7 @@ let main (argv: string array) : int =
                 i <- i + 1
 
             try
-                runBuild srcPaths out keepC cc opt marchNative
+                runBuild srcPaths out keepC cc opt marchNative library
             with
             | TypeError msg -> eprintfn "type error: %s" msg; 1
             | ex -> eprintfn "error: %s" ex.Message; 1

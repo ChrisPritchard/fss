@@ -45,9 +45,13 @@ Implemented so far (v0.2):
   hard compile failure)
 - builtins: `print_int`, `print_bool`, `print_newline`, `print_string`, `str_len`,
   `int_to_string`, `bool_to_string`, `read_line`, `read_file`, `write_file`,
-  `print_double`, `double_to_string`, `int_to_double`, `double_to_int`
-- **C interop**: `double`, `extern` declarations, `#include "h"` / `#link "lib"`
-  (or `[<Include("h")>]` / `[<Link("lib")>]`), so any C library is callable
+  `print_double`, `double_to_string`, `int_to_double`, `double_to_int`,
+  `cstring_of_string`, `string_of_cstring`, `cstring_null`,
+  `cstring_is_null`, `cstring_len`
+- **C interop**: `double`, `cstring` (`char*`), `extern` declarations,
+  `#include "h"` / `#link "lib"` (or `[<Include("h")>]` / `[<Link("lib")>]`),
+  so any C library is callable; `[<Export>]` + `--lib` builds a `.so`/`.dll`
+  with a generated header, so C can call fss
 
 Not yet: arrays, type annotations, local `let rec` and `and`, full `sprintf`,
 `try/finally`, `raise`. These are the next milestones in `DESIGN.md`.
@@ -68,8 +72,9 @@ Top-level mutual recursion is supported: `let rec even n = … and odd n = …`.
 - Heap memory uses a bump allocator (8 MB chunks) with 64 size-class free
   lists, backed by a conservative mark-sweep collector (stack + registered
   global roots) triggered at a 64 MB threshold.
-- C interop covers `int`, `bool`, `double`, `unit` and (by value) records;
-  raw C pointers / `char*` are not exposed yet, so C string APIs need a helper.
+- C interop covers `int`, `bool`, `double`, `cstring` (`char*`) and `unit`.
+  Arbitrary struct pointers, callbacks (C function pointers) and arrays are
+  not exposed yet.
 
 ## Build the compiler
 
@@ -153,13 +158,81 @@ let main () =
     0
 ```
 
-The emitted C becomes `extern double sqrt(double);` plus `-lm` at link time, so
-the call is a plain C function call — the compiler sees through it (gcc can
-inline `sqrt` with `-ffast-math` levels of visibility into libm wrappers).
+Each `extern` compiles to a static wrapper (`static double fs_ext_sqrt(double)
+{ return sqrt(a0); }`) plus `-lm` at link time, so the call is a plain C
+function call. fss deliberately does *not* re-declare the foreign prototype:
+the included header already declares it, and a duplicate declaration with
+slightly different types (say `char*` vs `const char*` for `strcmp`) would be
+a conflicting-types error. The wrapper lets C apply the usual implicit
+conversions.
 
 Interop types: `int` → `int32_t`, `bool` → `bool`, `double` → `double`,
-`string` → `fsstring_t` (UTF-8, length-prefixed; not `char*` — wrap C string
-APIs in a helper for now), `unit` → `void` for a return type.
+`cstring` → `char*`, `string` → `fsstring_t` (UTF-8, length-prefixed), `unit` →
+`void` for a return type.
+
+`cstring` is fss's raw C-string type:
+
+```fsharp
+#include <string.h>
+extern strlen(s: cstring) : int
+extern strchr(s: cstring, c: int) : cstring
+
+let s = cstring_of_string "hello"   // NUL-terminated copy (GC-managed)
+println (strlen s)                  // 5
+println (string_of_cstring s)       // hello
+println (s = cstring_of_string "hello")   // true (strcmp, not pointer equality)
+cstring_null ()                     // NULL
+cstring_is_null p                   // p == NULL
+cstring_len p                       // strlen p
+```
+
+Convert with `cstring_of_string` / `string_of_cstring`; `cstring` values
+compare by content.
+
+### Calling fss from C
+
+Mark top-level functions `[<Export>]` (optionally `[<Export("c_name")>]`) and
+build a shared library — no `main` needed:
+
+```fsharp
+[<Export>]
+let add x y = x + y
+
+[<Export("greet")>]
+let greeting (name: cstring) =
+    cstring_of_string ("hello, " + string_of_cstring name + "!")
+```
+
+```sh
+fss build mylib.fs -o mylib --lib     # -> mylib.so (Linux) / mylib.dll (Windows)
+```
+
+That also writes `mylib.h`:
+
+```c
+void fss_init(void);
+int32_t add(int32_t, int32_t);
+char* greet(char*);
+```
+
+Link and call it like any C library. An initializer runs automatically
+(a `__attribute__((constructor))` on GCC/Clang); on other toolchains call
+`fss_init()` yourself first:
+
+```c
+#include "mylib.h"
+int main(void) {
+    printf("%d
+", add(2, 3));
+    printf("%s
+", greet("world"));
+    return 0;
+}
+```
+
+Only C-compatible types can cross an `[<Export>]` boundary: `int`, `bool`,
+`double`, `cstring`, `unit`. Exposing `string`/lists/records is a compile
+error with a clear message (use `cstring` instead).
 
 `double` is a first-class type in fss (`1.5`, `sqrt`, `/`), with
 `int_to_double`, `double_to_int`, `double_to_string`, and `print_double` /

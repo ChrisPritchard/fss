@@ -485,8 +485,8 @@ fss build src/*.fs -o app         # multiple files, link them
    headers and linker flags. Emitted as plain C `extern` prototypes, so there
    is no marshalling layer. Raw C pointers / `char*` are not exposed yet.
 10. **Later**: arrays beyond 1-D, `seq`, Map/Set, computation expressions, the
-   OO subset, wasm target, `[<Export>]` (calling fss from C) and zero-copy
-   record structs for C interop.
+   OO subset, wasm target, zero-copy record structs / opaque `ptr` types and
+   C-function-pointer callbacks for interop.
 
 ---
 
