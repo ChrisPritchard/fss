@@ -231,6 +231,13 @@ let private builtinEnv : Map<string, Binding> =
         "abs_double", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
         "abs_int", { Scheme = Scheme([], FunTy(IntTy, IntTy)); Mutable = false }
         "pow", { Scheme = Scheme([], FunTy(DoubleTy, FunTy(DoubleTy, DoubleTy))); Mutable = false }
+        // F#-compatible numeric conversions.
+        "float", { Scheme = Scheme([], FunTy(IntTy, DoubleTy)); Mutable = false }
+        "int", { Scheme = Scheme([], FunTy(DoubleTy, IntTy)); Mutable = false }
+        // F#-compatible string conversions.
+        "string_of_int", { Scheme = Scheme([], FunTy(IntTy, StringTy)); Mutable = false }
+        "string", { Scheme = Scheme([], FunTy(IntTy, StringTy)); Mutable = false }
+        "string_of_bool", { Scheme = Scheme([], FunTy(BoolTy, StringTy)); Mutable = false }
     ]
 
 let private buildCaseInfo (types: (string * TypeDef) list) : Map<string, string * Ty> =

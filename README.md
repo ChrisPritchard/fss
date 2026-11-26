@@ -284,29 +284,45 @@ bootstrap and self-hosting round-trip checks (300+ cases total).
 
 ## Benchmark vs F#
 
-`bench/` contains the same small programs written in both fss and F#, with a
-script that times compilation and execution of each.
+`bench/` contains 13 small programs, each a **single `.fs` file compiled
+unchanged by fss, by F# (JIT) and by F# NativeAOT**, with a script that times
+compilation and execution of each and verifies all three print the same result.
 
 ```sh
-bash bench/run.sh
+bash bench/run.sh          # fss vs F# JIT vs F# NativeAOT
+bash bench/aot_bench.sh    # ... and C# NativeAOT
 ```
 
-See `bench/README.md` for the current numbers and the takeaways (compile time,
-run time, and where allocation-heavy code behaves differently).
+| program      | fss compile | F# compile | fss run | F# JIT | F# AOT |
+|--------------|-------------|------------|---------|--------|--------|
+| closures     | 366         | 883        | **44**  | 86     | 49     |
+| collatz      | 332         | 817        | **44**  | 89     | 54     |
+| du_eval      | 349         | 918        | 488     | 166    | **100**|
+| fib30        | 343         | 844        | **45**  | 108    | 71     |
+| float_math   | 355         | 836        | **37**  | 84     | 44     |
+| loop_count   | 310         | 765        | **32**  | 94     | 57     |
+| prime_count  | 387         | 810        | **37**  | 75     | 42     |
+| records      | 432         | 852        | 77      | 89     | **57** |
+| sort_list    | 338         | 894        | **49**  | 153    | 72     |
+| str_concat   | 345         | 804        | 73      | 94     | **61** |
+| string_build | 351         | 814        | **34**  | 75     | 41     |
+| sum_list     | 336         | 795        | **34**  | 77     | 42     |
+| tree_sum     | 354         | 886        | **33**  | 71     | 39     |
+
+(MSYS2, gcc 15, .NET 9; milliseconds, best of 3.) fss wins 10 of 13 against
+F# NativeAOT and all 13 against F# JIT; it loses on the three allocation-heavy
+programs. `bench/README.md` has the per-program descriptions.
 
 ### Why fss over F# NativeAOT?
 
-From those benchmarks, fss's advantages relative to F# NativeAOT are:
-
-- **Compile time** — fss compiles a file in ~280 ms (lex + type-check +
+- **Compile time** — fss compiles a file in ~350 ms (lex + type-check +
   monomorphize + C codegen + `gcc -O2`). F# NativeAOT is a whole-program
-  `dotnet publish` taking seconds (~2-6 s for these programs), so fss is
-  ~10-20× faster to iterate on during development.
-- **Run speed on compute-bound code** — fss native code is often faster than
-  F# NativeAOT for loops, integer arithmetic, and recursion (fib ~2.8×, a
-  100M-iteration loop ~7×, prime counting ~2× in `bench/`), because gcc
-  optimizes the emitted C directly (constant folding, strength reduction,
-  tail-call elimination).
+  `dotnet publish` taking seconds, so fss is ~10-20× faster to iterate on
+  during development.
+- **Run speed on compute-bound code** — fss native code is 1.2-1.8× faster than
+  F# NativeAOT for loops, integer arithmetic, recursion, closures and float
+  math, and ~2× faster than F# JIT, because gcc optimizes the emitted C
+  directly (constant folding, strength reduction, sibling-call elimination).
 - **No NativeAOT restrictions** — F# NativeAOT forbids reflection and several
   `printf`/format paths (the benchmark had to switch to
   `System.Console.WriteLine`). fss has no such constraints: everything lowers
@@ -320,11 +336,15 @@ From those benchmarks, fss's advantages relative to F# NativeAOT are:
   means fss inherits whatever targets the C compiler supports (wasm,
   microcontrollers, static musl builds) by swapping `--cc`.
 
-Allocation-heavy code was the historical weak spot; a bump allocator with
-size-class free lists (added in v0.2) brought `sort_list` from ~170 ms to
-~50 ms (now faster than F# JIT and F# AOT) and `str_concat` to ~90 ms (on par
-with F# JIT). The remaining cost for strings is the inherent O(n²) copying of
-immutable concatenation, which .NET pays too.
+### Where fss still loses
+
+Allocation-heavy code is the honest gap: `du_eval` (25M short-lived union
+nodes) is ~5× slower than F# NativeAOT, and `records`/`str_concat` ~1.2-1.35×
+slower. The runtime uses an 8 MB bump allocator with 16-byte size-class free
+lists plus a conservative mark-sweep collector — fast per allocation, but each
+collection does a full conservative scan and index rebuild, where .NET's
+generational GC has near-free gen0 collections. A younger generation (or a
+nursery bump-and-reset) is the next runtime project.
 
 ## Self-hosting goal
 

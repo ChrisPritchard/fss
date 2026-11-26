@@ -128,6 +128,7 @@ and parseTypeAtom (p: P) : Ty =
     | Lexer.Ident "unit" -> advance p |> ignore; UnitTy
     | Lexer.Ident "string" -> advance p |> ignore; StringTy
     | Lexer.Ident "double" -> advance p |> ignore; DoubleTy
+    | Lexer.Ident "float" -> advance p |> ignore; DoubleTy
     | Lexer.Ident "cstring" -> advance p |> ignore; CStrTy
     | Lexer.Ident "char*" -> advance p |> ignore; CStrTy
     | Lexer.Ident "void" -> advance p |> ignore; UnitTy

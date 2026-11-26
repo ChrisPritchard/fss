@@ -43,7 +43,8 @@ type UnaryOp =
 /// Builtin effectful functions, seeded into the initial environment.
 let builtinNames = [ "print_int"; "print_bool"; "print_newline"; "print_string"; "println"; "str_len"; "int_to_string"; "bool_to_string"; "read_line"; "read_file"; "write_file"; "str_get"; "str_sub"; "int_of_string"; "print_double"; "double_to_string"; "int_to_double"; "double_to_int"; "cstring_of_string"; "string_of_cstring"; "cstring_null"; "cstring_is_null"; "cstring_len";
                      "sqrt"; "pow"; "sin"; "cos"; "tan"; "log"; "exp"; "floor"; "ceil";
-                     "abs_double"; "abs_int" ]
+                     "abs_double"; "abs_int"; "float"; "int";
+                     "string_of_int"; "string_of_bool"; "string" ]
 
 /// Patterns (used in match arms).
 type Pattern =

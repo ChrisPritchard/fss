@@ -652,6 +652,11 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         | "cstring_null", [ _ ] -> "((char*)0)"
         | "cstring_is_null", [ a ] -> "(" + value a + " == (char*)0)"
         | "cstring_len", [ a ] -> "((int32_t)strlen(" + value a + "))"
+        | "float", [ a ] -> "((double)(" + value a + "))"
+        | "int", [ a ] -> "double_to_int(" + value a + ")"
+        | "string", [ a ] -> "int_to_string(" + value a + ")"
+        | "string_of_int", [ a ] -> "int_to_string(" + value a + ")"
+        | "string_of_bool", [ a ] -> "bool_to_string(" + value a + ")"
         | "sqrt", [ a ] -> "sqrt(" + value a + ")"
         | "sin", [ a ] -> "sin(" + value a + ")"
         | "cos", [ a ] -> "cos(" + value a + ")"
@@ -695,6 +700,11 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         | "cstring_null", [ _ ] -> "(void)0;"
         | "cstring_is_null", [ a ] -> "(void)(" + value a + ");"
         | "cstring_len", [ a ] -> "(void)strlen(" + value a + ");"
+        | "float", [ a ] -> "(void)((double)(" + value a + "));"
+        | "int", [ a ] -> "(void)double_to_int(" + value a + ");"
+        | "string", [ a ] -> "(void)int_to_string(" + value a + ");"
+        | "string_of_int", [ a ] -> "(void)int_to_string(" + value a + ");"
+        | "string_of_bool", [ a ] -> "(void)bool_to_string(" + value a + ");"
         | "sqrt", [ a ] -> "(void)sqrt(" + value a + ");"
         | "sin", [ a ] -> "(void)sin(" + value a + ");"
         | "cos", [ a ] -> "(void)cos(" + value a + ");"
@@ -1020,7 +1030,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         "static void print_string(fsstring_t s) { fwrite(s.data, 1, (size_t)s.len, stdout); fflush(stdout); }\n" +
         "\n" +
         "// --- conservative mark-sweep garbage collector ---\n" +
-        "typedef struct fs_block { struct fs_block* next; size_t size; uint8_t mark; } fs_block_t;\n" +
+        "typedef struct fs_block { struct fs_block* next; uint32_t size; uint32_t mark; } fs_block_t;\n" +
         "static fs_block_t* fs_heap = NULL;\n" +
         "static size_t fs_live = 0;\n" +
         "static struct { void* addr; size_t size; } fs_roots[1024];\n" +
@@ -1029,13 +1039,12 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         "static fs_block_t* fs_work[65536];\n" +
         "static int fs_work_n = 0;\n" +
         "static const size_t fs_threshold = 64 * 1024 * 1024;\n" +
-        "#define FS_CLASSES 64\n" +
+        "#define FS_CLASSES 512\n" +
         "static fs_block_t* fs_free_buckets[FS_CLASSES];\n" +
         "static char* fs_bump = NULL;\n" +
         "static char* fs_bump_end = NULL;\n" +
         "#define FS_CHUNK (8 * 1024 * 1024)\n" +
-        "static size_t fs_round_up(size_t n) { size_t r = 1; while (r < n) r <<= 1; return r; }\n" +
-        "static int fs_log2(size_t n) { int c = 0; while (n > 1) { n >>= 1; c++; } return c; }\n" +
+        "static int fs_class_of(size_t total) { size_t c = (total + 15) >> 4; return c < FS_CLASSES ? (int)c : FS_CLASSES - 1; }\n" +
         "\n" +
         "static void fs_gc_init(void* anchor) { fs_stack_bottom = anchor; }\n" +
         "static void fs_add_root(void* var_addr, size_t size) {\n" +
@@ -1118,21 +1127,23 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         "    while (*pp) {\n" +
         "        fs_block_t* b = *pp;\n" +
         "        if (b->mark) { b->mark = 0; fs_live += b->size; pp = &b->next; }\n" +
-        "        else { *pp = b->next; size_t t = fs_round_up(sizeof(fs_block_t) + b->size); int c = fs_log2(t); b->next = fs_free_buckets[c]; fs_free_buckets[c] = b; }\n" +
+        "        else { *pp = b->next; int c = fs_class_of(sizeof(fs_block_t) + b->size); b->next = fs_free_buckets[c]; fs_free_buckets[c] = b; }\n" +
         "    }\n" +
         "}\n" +
         "\n" +
         "static void* fs_alloc(size_t n) {\n" +
         "    if (fs_live + n > fs_threshold) fs_gc();\n" +
-        "    size_t total = fs_round_up(sizeof(fs_block_t) + n);\n" +
-        "    int c = fs_log2(total);\n" +
+        "    size_t total = sizeof(fs_block_t) + n;\n" +
+        "    int c = fs_class_of(total);\n" +
         "    fs_block_t* b = fs_free_buckets[c];\n" +
-        "    if (b != NULL) {\n" +
+        "    if (b != NULL && b->size >= n) {\n" +
         "        fs_free_buckets[c] = b->next;\n" +
-        "        b->size = n; b->mark = 0; b->next = fs_heap; fs_heap = b;\n" +
-        "        fs_live += n;\n" +
+        "        b->mark = 0; b->next = fs_heap; fs_heap = b;\n" +
+        "        fs_live += b->size;\n" +
         "        return (void*)(b + 1);\n" +
         "    }\n" +
+        "    total = (size_t)c << 4;\n" +
+        "    if (total < sizeof(fs_block_t) + n) total = (sizeof(fs_block_t) + n + 15) & ~(size_t)15;\n" +
         "    if (fs_bump == NULL || fs_bump + total > fs_bump_end) {\n" +
         "        fs_bump = (char*)malloc(FS_CHUNK);\n" +
         "        if (fs_bump == NULL) { fs_gc(); fs_bump = (char*)malloc(FS_CHUNK); }\n" +
