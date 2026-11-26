@@ -173,7 +173,12 @@ the test suite:
   milestone).
 
 To support them, `elif`, `str_get`, `str_sub`, `int_of_string`, recursive
-(pointer-boxed) user types, and top-level `let mutable` were added.
+(pointer-boxed) user types, and top-level `let mutable` were added. The
+self-hosted compiler also handles F# attributes (`[<EntryPoint>]`, ignored),
+`open System` + dotted `.NET` names (`Console.WriteLine`, `System.String`,
+`System.IO.File.ReadAllText`, …), type annotations (`(name: T)`, ignored), and
+`let main () = …`. Significant whitespace in the self-hosted compiler is the
+remaining gap (it still wants `in` for local lets).
 
 Known limitation: the .NET NativeAOT compiler binary hits a NativeAOT edge case
 on a few code shapes (recursive function + option + `if`), so it may not compile
