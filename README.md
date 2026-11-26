@@ -127,6 +127,13 @@ Flags:
 `-fwrapv` is always passed: F# `int` arithmetic is unchecked and wraps, while C
 signed overflow would otherwise be undefined behaviour.
 
+## Examples
+
+- `examples/idiomatic.fs` — pipes, `@`, `for`, local recursion, records and
+  unions; compiles unchanged with both `fss` and `fsc` and prints the same
+  output (`fss build examples/idiomatic.fs -o idiomatic`)
+- `examples/c_interop.fs` — calling libm through `extern`
+
 ## Syntax notes (small deviations from F#, for now)
 
 Both the verbose form (`;`, `in`, `( ... )`) and F#-style layout work:
