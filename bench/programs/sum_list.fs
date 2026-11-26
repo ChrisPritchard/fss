@@ -7,5 +7,5 @@ let main _ =
     while i < 10 do
         s <- s + sum 0 (build 20000 [])
         i <- i + 1
-    printf "%d\n" s
+    System.Console.WriteLine(s)
     0

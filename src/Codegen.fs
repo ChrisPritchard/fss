@@ -555,7 +555,11 @@ let emit (prog: Fss.Mono.Program) : string =
         | "print_bool", [ a ] -> sprintf "({ print_bool(%s); 0; })" (value a)
         | "print_newline", [ _ ] -> "({ print_newline(); 0; })"
         | "print_string", [ a ] -> "({ print_string(" + value a + "); 0; })"
-        | "println", [ a ] -> "({ print_string(" + value a + "); print_newline(); 0; })"
+        | "println", [ a ] ->
+            match Typer.resolveTy (tyOf a) with
+            | IntTy -> "({ print_int(" + value a + "); print_newline(); 0; })"
+            | BoolTy -> "({ print_bool(" + value a + "); print_newline(); 0; })"
+            | _ -> "({ print_string(" + value a + "); print_newline(); 0; })"
         | "str_len", [ a ] -> "(" + value a + ").len"
         | "int_to_string", [ a ] -> "int_to_string(" + value a + ")"
         | "bool_to_string", [ a ] -> "bool_to_string(" + value a + ")"
@@ -573,7 +577,11 @@ let emit (prog: Fss.Mono.Program) : string =
         | "print_bool", [ a ] -> "print_bool(" + value a + ");"
         | "print_newline", [ _ ] -> "print_newline();"
         | "print_string", [ a ] -> "print_string(" + value a + ");"
-        | "println", [ a ] -> "print_string(" + value a + "); print_newline();"
+        | "println", [ a ] ->
+            match Typer.resolveTy (tyOf a) with
+            | IntTy -> "print_int(" + value a + "); print_newline();"
+            | BoolTy -> "print_bool(" + value a + "); print_newline();"
+            | _ -> "print_string(" + value a + "); print_newline();"
         | "str_len", [ a ] -> "(void)(" + value a + ".len);"
         | "int_to_string", [ a ] -> "(void)int_to_string(" + value a + ");"
         | "bool_to_string", [ a ] -> "(void)bool_to_string(" + value a + ");"

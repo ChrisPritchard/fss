@@ -22,7 +22,7 @@ static class Bench {
             case "str_concat": {
                 string s = "";
                 for (int i = 0; i < 20000; i++) s += "x";
-                Console.WriteLine(s.Length); break;
+                Console.WriteLine(s); break;
             }
             case "prime_count": {
                 int c = 0;

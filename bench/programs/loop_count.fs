@@ -5,5 +5,5 @@ let main _ =
     while i < 100000000 do
         x <- x + 1
         i <- i + 1
-    printf "%d\n" x
+    System.Console.WriteLine(x)
     0

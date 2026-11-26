@@ -32,13 +32,12 @@ printf '\n%-12s | %-9s | %-9s | %-9s | %-9s | %-12s\n' \
 printf '%.0s-' {1..78}; printf '\n'
 
 for name in "${PROGS[@]}"; do
-    fss_src="bench/programs/$name.fss"
-    fs_src="bench/programs/$name.fs"
-    [ -f "$fss_src" ] || continue
+    src="bench/programs/$name.fs"
+    [ -f "$src" ] || continue
 
-    # fss native
+    # fss native (same source file)
     fss_bin="bench/build/${name}_fss.exe"
-    "${FSS_CMD[@]}" build "$fss_src" -o "bench/build/${name}_fss" >/dev/null 2>&1
+    "${FSS_CMD[@]}" build "$src" -o "bench/build/${name}_fss" >/dev/null 2>&1
     fss_rt=$(min3 "$fss_bin")
     fss_out="$("$fss_bin" 2>/dev/null | tr -d '\r')"
 
@@ -47,7 +46,7 @@ for name in "${PROGS[@]}"; do
     sdk_ver="${FSC%% *}"; sdk_root="${FSC#*[}"; sdk_root="${sdk_root%]}"
     fsc="${sdk_root//\\//}/$sdk_ver/FSharp/fsc.dll"
     fs_bin="bench/build/${name}_fsjit.exe"
-    dotnet "$fsc" --target:exe --optimize+ "$fs_src" -o "$fs_bin" >/dev/null 2>&1
+    dotnet "$fsc" --target:exe --optimize+ "$src" -o "$fs_bin" >/dev/null 2>&1
     echo '{ "runtimeOptions": { "tfm": "net9.0", "framework": { "name": "Microsoft.NETCore.App", "version": "9.0.0" } } }' > "bench/build/${name}_fsjit.runtimeconfig.json"
     fsjit_rt=$(min3 dotnet "$fs_bin")
 

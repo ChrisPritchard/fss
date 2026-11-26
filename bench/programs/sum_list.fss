@@ -1,8 +1,0 @@
-let rec build n acc = if n = 0 then acc else build (n - 1) (n :: acc)
-let rec sum acc xs = match xs with [] -> acc | h :: t -> sum (acc + h) t
-
-let main () =
-    let mutable s = 0 in
-    let mutable i = 0 in
-    (while i < 10 do (s <- s + sum 0 (build 20000 []); i <- i + 1);
-     print_int s; print_newline ())

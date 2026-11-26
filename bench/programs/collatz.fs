@@ -13,5 +13,5 @@ let main _ =
     while i <= 100000 do
         total <- total + collatz_len i
         i <- i + 1
-    printf "%d\n" total
+    System.Console.WriteLine(total)
     0

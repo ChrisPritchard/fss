@@ -194,7 +194,7 @@ let private builtinEnv : Map<string, Binding> =
         "print_bool", { Scheme = Scheme([], FunTy(BoolTy, UnitTy)); Mutable = false }
         "print_newline", { Scheme = Scheme([], FunTy(UnitTy, UnitTy)); Mutable = false }
         "print_string", { Scheme = Scheme([], FunTy(StringTy, UnitTy)); Mutable = false }
-        "println", { Scheme = Scheme([], FunTy(StringTy, UnitTy)); Mutable = false }
+        "println", { Scheme = Scheme([999999], FunTy(TyVar 999999, UnitTy)); Mutable = false }
         "str_len", { Scheme = Scheme([], FunTy(StringTy, IntTy)); Mutable = false }
         "int_to_string", { Scheme = Scheme([], FunTy(IntTy, StringTy)); Mutable = false }
         "bool_to_string", { Scheme = Scheme([], FunTy(BoolTy, StringTy)); Mutable = false }

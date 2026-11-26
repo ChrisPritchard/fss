@@ -19,7 +19,7 @@ Implemented so far (v0.2):
 - lexer, parser, type checker (Hindley-Milner-style unification), C codegen, gcc driver
 - `int` (32-bit), `bool`, `unit`, function types `t -> u`
 - arithmetic `+ - * / %`, comparison `= <> < <= > >=`, logic `&& || not`, negation `-`
-- `if / then / else` (statement and expression), `while / do`
+- `if / then / else` (statement and expression), `if / then` (unit if), `while / do`
 - `let ... in ...`, `let mutable ... in ...`, `<-`
 - functions: `let f x y = ...`, `let rec f x = ...`, lambdas `fun x -> ...`, application `f x`
 - closures (capture by value; mutable captures by reference), partial application

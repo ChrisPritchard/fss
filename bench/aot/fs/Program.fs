@@ -29,7 +29,7 @@ let main argv =
         while i < 20000 do
             s <- s + "x"
             i <- i + 1
-        System.Console.WriteLine(s.Length)
+        System.Console.WriteLine(s)
     | "prime_count" ->
         let mutable c = 0
         let mutable i = 2

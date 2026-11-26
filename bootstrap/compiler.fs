@@ -533,7 +533,7 @@ and parseIfTail c t toks =
     | TIdent "else" :: r ->
         (match parseExpr (skipSeps r) with
          | (e, r4) -> (EIf (c, t, e), r4))
-    | _ -> failwith "expected 'else'"
+    | _ -> (EIf (c, t, EUnit), toks)
 
 and parseParams toks =
     match toks with

@@ -5,4 +5,4 @@ let rec sum t = match t with Leaf n -> n | Node (l, r) -> sum l + sum r
 let rec build n = if n = 0 then Leaf 0 else Node (build (n - 1), Leaf n)
 
 [<EntryPoint>]
-let main _ = printf "%d\n" (sum (build 1000)); 0
+let main _ = System.Console.WriteLine(sum (build 1000)); 0

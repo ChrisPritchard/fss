@@ -13,5 +13,5 @@ let main _ =
     while i < 100000 do
         if is_prime i then count <- count + 1
         i <- i + 1
-    printf "%d\n" count
+    System.Console.WriteLine(count)
     0

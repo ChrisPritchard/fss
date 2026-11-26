@@ -14,6 +14,6 @@ let rec build n = if n = 0 then [] else n :: build (n - 1)
 let main _ =
     let sorted = sort (build 1500)
     match sorted with
-    | a :: b :: _ -> printf "%d\n" (a * 1000 + b)
-    | _ -> printf "0\n"
+    | a :: b :: _ -> System.Console.WriteLine(a * 1000 + b)
+    | _ -> System.Console.WriteLine(0)
     0

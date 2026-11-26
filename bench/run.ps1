@@ -46,16 +46,14 @@ Write-Host ''
 Write-Host ('{0,-14} {1,11} {2,11} {3,11} {4,11}  {5}' -f 'program','fss cmp ms','F# cmp ms','fss run ms','F# run ms','output match')
 Write-Host ('-' * 78)
 
-Get-ChildItem bench\programs\*.fss | Sort-Object Name | ForEach-Object {
+Get-ChildItem bench\programs\*.fs | Sort-Object Name | ForEach-Object {
     $name = $_.BaseName
-    $fsSrc = "bench\programs\$name.fs"
-    if (-not (Test-Path $fsSrc)) { return }
 
     $fssBin = "bench\build\${name}_fss.exe"
     $fsBin  = "bench\build\${name}_fs.exe"
 
     $fssCT = Time-Command { dotnet src\bin\Release\net9.0\fss.dll build $_.FullName -o "bench\build\${name}_fss" }
-    $fsCT  = Time-Command { dotnet $fsc --target:exe --optimize+ $fsSrc -o $fsBin }
+    $fsCT  = Time-Command { dotnet $fsc --target:exe --optimize+ $_.FullName -o $fsBin }
     Set-Content -Path "bench\build\${name}_fs.runtimeconfig.json" -Value $runtimeconfig -NoNewline
 
     $fssOut = ((& $fssBin 2>$null) -join "`n").Trim()

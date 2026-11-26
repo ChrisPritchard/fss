@@ -353,7 +353,9 @@ and parseIfTail (p: P) : Expr =
     | Lexer.Else ->
         advance p |> ignore
         parseStmt p
-    | k -> failwith ("line " + string (peek p).Line + ": expected 'elif' or 'else', found " + Lexer.tokKindName k)
+    | _ ->
+        // `if c then x` with no else: F# unit-if, desugars to `if c then x else ()`.
+        Unit
 
 and parseTry (p: P) : Expr =
     advance p |> ignore

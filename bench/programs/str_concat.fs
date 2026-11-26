@@ -5,5 +5,5 @@ let main _ =
     while i < 20000 do
         acc <- acc + "x"
         i <- i + 1
-    printf "%d\n" (String.length acc)
+    System.Console.WriteLine(acc)
     0

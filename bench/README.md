@@ -7,9 +7,12 @@ result.
 
 ## Layout
 
-- `programs/<name>.fss` — fss source (`let main () = …`)
-- `programs/<name>.fs`  — F# source (`[<EntryPoint>] let main _ = …`)
-- `run.sh` — compiles both, runs each 3×, and prints a timing table
+- `programs/<name>.fs` — a **single** F# source file, compiled by both fss and
+  F#. It uses the common subset: `[<EntryPoint>] let main _ = …` (fss ignores
+  the attribute), `System.Console.WriteLine` (aliased to fss `println`), and
+  F#-style indentation (fss's layout pass).
+- `run.sh` / `run.bat` — compile with both, run each 3×, print a timing table
+- `aot_bench.sh` — adds C# NativeAOT and F# NativeAOT comparisons
 
 ## Running
 

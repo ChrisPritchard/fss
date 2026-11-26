@@ -63,18 +63,16 @@ printf '\n%-14s | %-16s | %-16s | %-14s | %-14s | %-12s\n' \
     "program" "fss compile(ms)" "F# compile(ms)" "fss run(ms)" "F# run(ms)" "output match"
 printf '%.0s-' {1..100}; printf '\n'
 
-for fss_src in bench/programs/*.fss; do
-    name="$(basename "$fss_src" .fss)"
-    fs_src="bench/programs/$name.fs"
-    [ -f "$fs_src" ] || continue
+for src in bench/programs/*.fs; do
+    name="$(basename "$src" .fs)"
 
-    # --- compile fss -> native C -> gcc ---
+    # --- compile fss -> native C -> gcc (same source file) ---
     fss_bin="bench/build/${name}_fss${EXE}"
-    fss_ct=$(time_ms "${FSS_CMD[@]}" build "$fss_src" -o "bench/build/${name}_fss")
+    fss_ct=$(time_ms "${FSS_CMD[@]}" build "$src" -o "bench/build/${name}_fss")
 
-    # --- compile F# -> .NET assembly ---
+    # --- compile F# -> .NET assembly (same source file) ---
     fs_bin="bench/build/${name}_fs.exe"
-    fs_ct=$(time_ms dotnet "$FSC" --target:exe --optimize+ "$fs_src" -o "$fs_bin")
+    fs_ct=$(time_ms dotnet "$FSC" --target:exe --optimize+ "$src" -o "$fs_bin")
     printf '%s' "$RUNTIMECONFIG" > "bench/build/${name}_fs.runtimeconfig.json"
 
     # --- run + verify output ---
