@@ -63,9 +63,8 @@ Timings are wall-clock milliseconds; runs are the best of 3.
 
 ## AOT comparison
 
-`bench/aot_bench.sh` also compares against **C# NativeAOT** and **F#
-NativeAOT** (single self-contained binaries that dispatch on a program name),
-plus F# JIT as a baseline:
+**F# NativeAOT** is now part of the main `run.sh`/`run.bat` table (published once,
+run per program). `bench/aot_bench.sh` additionally compares **C# NativeAOT**:
 
 ```bash
 bash bench/aot_bench.sh

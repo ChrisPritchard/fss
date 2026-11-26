@@ -42,9 +42,13 @@ function Min-Run([scriptblock]$cmd) {
     return $best
 }
 
+Write-Host 'Publishing F# NativeAOT (once)...'
+$fsAotCT = Time-Command { dotnet publish bench\aot\fs\fs.fsproj -c Release -r win-x64 -o bench\build\aot_fs }
+$fsAotBin = 'bench\build\aot_fs\fss_bench_fs.exe'
+
 Write-Host ''
-Write-Host ('{0,-14} {1,11} {2,11} {3,11} {4,11}  {5}' -f 'program','fss cmp ms','F# cmp ms','fss run ms','F# run ms','output match')
-Write-Host ('-' * 78)
+Write-Host ('{0,-14} {1,11} {2,11} {3,11} {4,11} {5,11}  {6}' -f 'program','fss cmp ms','F# cmp ms','fss run ms','F# JIT ms','F# AOT ms','match')
+Write-Host ('-' * 92)
 
 Get-ChildItem bench\programs\*.fs | Sort-Object Name | ForEach-Object {
     $name = $_.BaseName
@@ -58,15 +62,18 @@ Get-ChildItem bench\programs\*.fs | Sort-Object Name | ForEach-Object {
 
     $fssOut = ((& $fssBin 2>$null) -join "`n").Trim()
     $fsOut  = ((& dotnet $fsBin 2>$null) -join "`n").Trim()
-    $match = if ($fssOut -eq $fsOut) { 'yes' } else { "NO ($fssOut vs $fsOut)" }
+    $fsAotOut = ((& $fsAotBin $name 2>$null) -join "`n").Trim()
+    $match = if ($fssOut -eq $fsOut -and $fssOut -eq $fsAotOut) { 'yes' } else { 'NO' }
 
     $fssRT = Min-Run { & $fssBin }
     $fsRT  = Min-Run { & dotnet $fsBin }
+    $fsAotRT = Min-Run { & $fsAotBin $name }
 
-    Write-Host ('{0,-14} {1,11} {2,11} {3,11} {4,11}  {5}' -f $name,$fssCT,$fsCT,$fssRT,$fsRT,$match)
+    Write-Host ('{0,-14} {1,11} {2,11} {3,11} {4,11} {5,11}  {6}' -f $name,$fssCT,$fsCT,$fssRT,$fsRT,$fsAotRT,$match)
 }
 
 Write-Host ''
 Write-Host 'Timings are wall-clock milliseconds (best of 3 runs for execution).'
 Write-Host 'fss compiles fss -> C -> native binary via gcc -O2.'
-Write-Host 'F# is compiled with fsc --optimize+ and runs on the .NET 9 runtime (JIT).'
+Write-Host 'F# JIT is compiled with fsc --optimize+ (run on the .NET 9 runtime).'
+Write-Host "F# NativeAOT published once in $fsAotCT ms (single self-contained binary)."

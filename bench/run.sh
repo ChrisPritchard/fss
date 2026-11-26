@@ -26,17 +26,17 @@ fi
 
 # On Windows/MSYS2 the fss compiler emits a `.exe`; on Linux/WSL it does not.
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) EXE=.exe ;;
-    *) EXE= ;;
+    MINGW*|MSYS*|CYGWIN*) EXE=.exe; RID=win-x64 ;;
+    *) EXE=; RID=linux-x64 ;;
 esac
 
 RUNTIMECONFIG='{ "runtimeOptions": { "tfm": "net9.0", "framework": { "name": "Microsoft.NETCore.App", "version": "9.0.0" } } }'
 
-echo "Building the fss compiler (once, not part of per-program timings)..."
-dotnet build src/Fss.fsproj -c Release -v q >/dev/null || { echo "fss compiler build failed" >&2; exit 1; }
-
 rm -rf bench/build
 mkdir -p bench/build
+
+echo "Building the fss compiler (once, not part of per-program timings)..."
+dotnet build src/Fss.fsproj -c Release -v q >/dev/null || { echo "fss compiler build failed" >&2; exit 1; }
 
 now_ns() { date +%s%N; }
 
@@ -59,8 +59,12 @@ min_run() {
     echo "$best"
 }
 
-printf '\n%-14s | %-16s | %-16s | %-14s | %-14s | %-12s\n' \
-    "program" "fss compile(ms)" "F# compile(ms)" "fss run(ms)" "F# run(ms)" "output match"
+echo "Publishing F# NativeAOT (once)..."
+fs_aot_ct=$(time_ms dotnet publish bench/aot/fs/fs.fsproj -c Release -r "$RID" -o bench/build/aot_fs)
+FS_AOT_BIN="bench/build/aot_fs/fss_bench_fs.exe"
+
+printf '\n%-14s | %-16s | %-16s | %-14s | %-14s | %-14s | %-12s\n' \
+    "program" "fss compile(ms)" "F# compile(ms)" "fss run(ms)" "F# JIT(ms)" "F# AOT(ms)" "match"
 printf '%.0s-' {1..100}; printf '\n'
 
 for src in bench/programs/*.fs; do
@@ -78,15 +82,18 @@ for src in bench/programs/*.fs; do
     # --- run + verify output ---
     fss_out="$("$fss_bin" 2>/dev/null | tr -d '\r')"
     fs_out="$(dotnet "$fs_bin" 2>/dev/null | tr -d '\r')"
-    if [ "$fss_out" = "$fs_out" ]; then match=yes; else match="NO ($fss_out vs $fs_out)"; fi
+    fs_aot_out="$("$FS_AOT_BIN" "$name" 2>/dev/null | tr -d '\r')"
+    if [ "$fss_out" = "$fs_out" ] && [ "$fss_out" = "$fs_aot_out" ]; then match=yes; else match="NO"; fi
 
     fss_rt=$(min_run "$fss_bin")
     fs_rt=$(min_run dotnet "$fs_bin")
+    fs_aot_rt=$(min_run "$FS_AOT_BIN" "$name")
 
-    printf '%-14s | %-16s | %-16s | %-14s | %-14s | %-12s\n' \
-        "$name" "$fss_ct" "$fs_ct" "$fss_rt" "$fs_rt" "$match"
+    printf '%-14s | %-16s | %-16s | %-14s | %-14s | %-14s | %-12s\n' \
+        "$name" "$fss_ct" "$fs_ct" "$fss_rt" "$fs_rt" "$fs_aot_rt" "$match"
 done
 
 printf '\nTimings are wall-clock milliseconds (best of 3 runs for execution).\n'
 printf 'fss compiles fss -> C -> native binary via gcc -O2.\n'
-printf 'F# is compiled with fsc --optimize+ and runs on the .NET 9 runtime (JIT).\n'
+printf 'F# JIT is compiled with fsc --optimize+ (run on the .NET 9 runtime).\n'
+printf 'F# NativeAOT published once in %s ms (single self-contained binary).\n' "$fs_aot_ct"

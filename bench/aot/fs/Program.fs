@@ -1,4 +1,24 @@
+type Tree = Leaf of int | Node of Tree * Tree
+
 let rec fib n = if n < 2 then n else fib (n - 1) + fib (n - 2)
+
+let rec buildList n acc = if n = 0 then acc else buildList (n - 1) (n :: acc)
+let rec sumList acc xs = match xs with [] -> acc | h :: t -> sumList (acc + h) t
+
+let rec insert x xs =
+    match xs with
+    | [] -> [x]
+    | h :: t -> if x <= h then x :: h :: t else h :: insert x t
+
+let rec sort xs =
+    match xs with
+    | [] -> []
+    | h :: t -> insert h (sort t)
+
+let rec buildDesc n = if n = 0 then [] else n :: buildDesc (n - 1)
+
+let rec treeSum t = match t with Leaf n -> n | Node (l, r) -> treeSum l + treeSum r
+let rec buildTree n = if n = 0 then Leaf 0 else Node (buildTree (n - 1), Leaf n)
 
 [<EntryPoint>]
 let main argv =
@@ -11,6 +31,13 @@ let main argv =
             x <- x + 1
             i <- i + 1
         System.Console.WriteLine(x)
+    | "sum_list" ->
+        let mutable s = 0
+        let mutable i = 0
+        while i < 10 do
+            s <- s + sumList 0 (buildList 20000 [])
+            i <- i + 1
+        System.Console.WriteLine(s)
     | "collatz" ->
         let mutable total = 0
         let mutable i = 1
@@ -42,5 +69,10 @@ let main argv =
             if p then c <- c + 1
             i <- i + 1
         System.Console.WriteLine(c)
+    | "sort_list" ->
+        match sort (buildDesc 1500) with
+        | a :: b :: _ -> System.Console.WriteLine(a * 1000 + b)
+        | _ -> System.Console.WriteLine(0)
+    | "tree_sum" -> System.Console.WriteLine(treeSum (buildTree 1000))
     | _ -> System.Console.WriteLine("?")
     0
