@@ -351,6 +351,11 @@ let layout (toks: Token list) : Token list =
     let mk k line = { Kind = k; Line = line; Col = 0 }
 
     // Is out[s..fin) of the form `let [rec] [mutable] <name> =` (a value binding)?
+    /// True when the statement starting at `s` is a `let` binding whose body
+    /// extends to the end of the enclosing block — that is, a local binding in
+    /// layout style, so the layout pass must supply its `in`. Matches both
+    /// `let x = e` and `let f a b = e` (the `=` is found by scanning past the
+    /// parameter names).
     let isValueLet (s: int) (fin: int) : bool =
         let mutable k = s
         if k >= fin || out.[k].Kind <> Let then false
@@ -358,9 +363,21 @@ let layout (toks: Token list) : Token list =
             k <- k + 1
             if k < fin && out.[k].Kind = Rec then k <- k + 1
             if k < fin && out.[k].Kind = Mutable then k <- k + 1
-            k + 1 < fin
-            && (match out.[k].Kind with Ident _ -> true | _ -> false)
-            && out.[k + 1].Kind = Eq
+            if not (k < fin && (match out.[k].Kind with Ident _ -> true | _ -> false)) then false
+            else
+                // Find the '=' of the binding header, stopping if the binding
+                // turns out to be fully explicit (already has 'in' or ';').
+                k <- k + 1
+                let mutable found = false
+                let mutable stop = k >= fin
+                while not found && not stop do
+                    match out.[k].Kind with
+                    | Eq -> found <- true
+                    | In | Semi | EOF -> stop <- true
+                    | _ ->
+                        k <- k + 1
+                        if k >= fin then stop <- true
+                found
 
     let isExplicitOpener k =
         match k with
@@ -368,9 +385,17 @@ let layout (toks: Token list) : Token list =
         | _ -> false
 
     let mutable prevLine = -1
-    let mutable stmtStart = 0
     let mutable bracketDepth = 0
     let mutable i = 0
+
+    // Statement-start position of the block currently being laid out. A stack
+    // is needed because a block can be opened *inside* a binding's body
+    // (`let f x =` followed by an indented body): when that block closes we
+    // must remember where the enclosing `let` started.
+    let stmtStarts = ResizeArray<int>()
+    stmtStarts.Add 0
+    let curStmtStart () = stmtStarts.[stmtStarts.Count - 1]
+    let setStmtStart (v: int) = stmtStarts.[stmtStarts.Count - 1] <- v
 
     while i < arr.Length do
         let t = arr.[i]
@@ -389,13 +414,14 @@ let layout (toks: Token list) : Token list =
             // dedent: close blocks until the indentation fits
             while st.Count > 1 && ni < st.[st.Count - 1] do
                 st.RemoveAt(st.Count - 1)
+                if stmtStarts.Count > 1 then stmtStarts.RemoveAt(stmtStarts.Count - 1)
                 out.Add(mk RParen t.Line)
 
             if ni > st.[st.Count - 1] then
                 if blockOpener prev && not (isExplicitOpener t.Kind) && t.Kind <> Bar then
                     st.Add ni
                     out.Add(mk LParen t.Line)
-                    stmtStart <- out.Count
+                    stmtStarts.Add out.Count
                 // else: expression continuation across lines; ignore the newline
 
             else if ni = st.[st.Count - 1] then
@@ -406,15 +432,16 @@ let layout (toks: Token list) : Token list =
                     | Elif | Else | AndKw | Bar | With -> true
                     | _ -> false
                 if st.Count > 1 && not (continuesLine prev) && not continuesNext then
-                    if isValueLet stmtStart (out.Count) then
+                    if t.Kind <> In && isValueLet (curStmtStart ()) (out.Count) then
                         // `let x = e` extends to the end of the enclosing block,
                         // so wrap the rest of the block as its body.
                         out.Add(mk In t.Line)
                         st.Add ni
                         out.Add(mk LParen t.Line)
+                        stmtStarts.Add out.Count
                     else
                         out.Add(mk Semi t.Line)
-                    stmtStart <- out.Count
+                        setStmtStart out.Count
 
             out.Add t
             prevLine <- t.Line

@@ -44,7 +44,7 @@ type UnaryOp =
 let builtinNames = [ "print_int"; "print_bool"; "print_newline"; "print_string"; "println"; "str_len"; "int_to_string"; "bool_to_string"; "read_line"; "read_file"; "write_file"; "str_get"; "str_sub"; "int_of_string"; "print_double"; "double_to_string"; "int_to_double"; "double_to_int"; "cstring_of_string"; "string_of_cstring"; "cstring_null"; "cstring_is_null"; "cstring_len";
                      "sqrt"; "pow"; "sin"; "cos"; "tan"; "log"; "exp"; "floor"; "ceil";
                      "abs_double"; "abs_int"; "float"; "int";
-                     "string_of_int"; "string_of_bool"; "string" ]
+                     "string_of_int"; "string_of_bool"; "string"; "__op_append" ]
 
 /// Patterns (used in match arms).
 type Pattern =
@@ -71,7 +71,8 @@ type Expr =
     | Binary of BinOp * Expr * Expr
     | If of Expr * Expr * Expr
     | Let of string * Expr * Expr          // let x = e1 in e2
-    | LetRec of string * Expr * Expr       // let rec x = e1 in e2 (top level only)
+    | LetRec of string * Expr * Expr       // let rec x = e1 in e2
+    | LetRecGroup of (string * Expr) list * Expr   // let rec f = e and g = e in body
     | LetMutable of string * Expr * Expr   // let mutable x = e1 in e2
     | Assign of string * Expr              // x <- e
     | While of Expr * Expr                 // while e1 do e2
@@ -131,6 +132,10 @@ let rec exprToString (e: Expr) : string =
     | If (c, t, e) -> sprintf "(if %s then %s else %s)" (exprToString c) (exprToString t) (exprToString e)
     | Let (n, v, b) -> sprintf "(let %s = %s in %s)" n (exprToString v) (exprToString b)
     | LetRec (n, v, b) -> sprintf "(let rec %s = %s in %s)" n (exprToString v) (exprToString b)
+    | LetRecGroup (bs, b) ->
+        sprintf "(let rec %s in %s)"
+            (bs |> List.map (fun (n, v) -> n + " = " + exprToString v) |> String.concat " and ")
+            (exprToString b)
     | LetMutable (n, v, b) -> sprintf "(let mutable %s = %s in %s)" n (exprToString v) (exprToString b)
     | Assign (n, e) -> sprintf "(%s <- %s)" n (exprToString e)
     | While (c, b) -> sprintf "(while %s do %s)" (exprToString c) (exprToString b)

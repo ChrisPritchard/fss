@@ -15,16 +15,15 @@ let private unsupportedIdents =
 /// unsupported F# constructs. Empty list means nothing obviously unsupported.
 let scan (src: string) : string list =
     let toks = Lexer.tokenize src
-    [ for t in toks do
+    let arr = Array.ofList toks
+    [ for i in 0 .. arr.Length - 1 do
+        let t = arr.[i]
         match t.Kind with
-        | Lexer.For -> yield sprintf "line %d: 'for' loops are not supported; use 'while'" t.Line
-        | Lexer.To | Lexer.Downto -> yield sprintf "line %d: 'to'/'downto' (part of a 'for' loop)" t.Line
         | Lexer.Module -> yield sprintf "line %d: 'module' declarations are not supported" t.Line
         | Lexer.Namespace -> yield sprintf "line %d: 'namespace' declarations are ignored by fss" t.Line
-        | Lexer.PipeRight -> yield sprintf "line %d: '|>' pipe operator is not supported" t.Line
-        | Lexer.PipeLeft -> yield sprintf "line %d: '<|' pipe operator is not supported" t.Line
-        | Lexer.Append -> yield sprintf "line %d: '@' list-append operator is not supported" t.Line
         | Lexer.Caret -> yield sprintf "line %d: '^' operator is not supported" t.Line
+        | Lexer.Dot when i + 1 < arr.Length && arr.[i + 1].Kind = Lexer.Dot ->
+            yield sprintf "line %d: range syntax '..' is not supported; use 'for i = a to b'" t.Line
         | Lexer.Ident n when Set.contains n unsupportedIdents ->
             yield sprintf "line %d: '%s' is not supported" t.Line n
         | _ -> () ]

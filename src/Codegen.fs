@@ -4,7 +4,12 @@ open Fss.Ast
 open Fss.Typer
 open System.Text
 
-type private ScopeEntry = { CName: string; Ty: Ty; Mutable: bool }
+type private ScopeEntry =
+    { CName: string
+      Ty: Ty
+      Mutable: bool
+      /// For a recursive local function: the C name of the cell holding its closure.
+      Cell: string option }
 
 /// C type used for an `[<Export>]`ed fss function's parameter/return type.
 /// Only plain C-compatible types may cross the boundary.
@@ -149,7 +154,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         prog.Externs |> List.map (fun (n, ps, r) -> n, (ps |> List.map snd, r)) |> Map.ofList
 
     for (n, t, _, mf) in topValueList do
-        scope <- Map.add n { CName = "v_" + n; Ty = t; Mutable = mf } scope
+        scope <- Map.add n { CName = "v_" + n; Ty = t; Mutable = mf; Cell = None } scope
 
     let tagIndexOf (case: string) : int =
         match Map.tryFind case prog.Ctors with
@@ -280,6 +285,18 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
             eqBuf.Add(sprintf "static bool %s(%s* a, %s* b) { if (a == NULL || b == NULL) return a == b; return %s && %s(a->tail, b->tail); }" name ln ln ee name)
         name
 
+    /// List append (`@`): copy the spine of `a` in front of `b`, iteratively
+    /// (no recursion, no stack growth for long lists).
+    and appendList (e: Ty) : string =
+        let ln = listName e
+        let name = "fs_append_" + ln
+        if eqSet.Add name then
+            eqBuf.Add(
+                sprintf
+                    "static %s* %s(%s* a, %s* b) { %s* rev = NULL; for (%s* p = a; p != NULL; p = p->tail) { %s* n = (%s*)fs_alloc(sizeof(%s)); n->head = p->head; n->tail = rev; rev = n; } while (rev != NULL) { %s* n = (%s*)fs_alloc(sizeof(%s)); n->head = rev->head; n->tail = b; b = n; rev = rev->tail; } return b; }"
+                    ln name ln ln ln ln ln ln ln ln ln ln)
+        name
+
     and eqOption (e: Ty) : string =
         let on = optionName e
         let name = "eq_" + on
@@ -353,6 +370,9 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         | TIf (_, c, t, e) -> Set.unionMany [ freeVars c; freeVars t; freeVars e ]
         | TLet (n, _, v, b) -> Set.union (freeVars v) (Set.remove n (freeVars b))
         | TLetRec (n, _, v, b) -> Set.union (Set.remove n (freeVars v)) (Set.remove n (freeVars b))
+        | TLetRecGroup (bs, b) ->
+            let names = bs |> List.map (fun (n, _, _) -> n) |> Set.ofList
+            Set.difference (Set.unionMany (freeVars b :: (bs |> List.map (fun (_, _, v) -> freeVars v)))) names
         | TLetMutable (n, _, v, b) -> Set.union (freeVars v) (Set.remove n (freeVars b))
         | TAssign (n, e) -> Set.add n (freeVars e)
         | TWhile (c, b) -> Set.union (freeVars c) (freeVars b)
@@ -408,7 +428,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
     let rec patternTest (p: TPattern) (target: string) : (string * (string * ScopeEntry) list) =
         match p with
         | TPWildcard -> ("true", [])
-        | TPVar (n, ty) -> ("true", [ (n, { CName = target; Ty = ty; Mutable = false }) ])
+        | TPVar (n, ty) -> ("true", [ (n, { CName = target; Ty = ty; Mutable = false; Cell = None }) ])
         | TPInt k -> (target + " == " + string k, [])
         | TPBool b -> (target + " == " + (if b then "true" else "false"), [])
         | TPUnit -> ("true", [])
@@ -488,7 +508,8 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
                 sprintf "({ %s %s; if (%s) %s = %s; else %s = %s; %s; })"
                     (ctypeArg rt) tn (value c) tn (value t) tn (value e) tn
         | TLet (n, ty, bound, body) -> valueLet n ty bound body false
-        | TLetRec (n, ty, bound, body) -> valueLet n ty bound body false
+        | TLetRec (n, ty, bound, body) -> valueRecLet n ty bound body
+        | TLetRecGroup (bs, body) -> valueRecGroup bs body
         | TLetMutable (n, ty, bound, body) -> valueLet n ty bound body true
         | TAssign (n, e) -> sprintf "({ %s = %s; 0; })" (resolve n) (value e)
         | TWhile (c, body) -> sprintf "({ while (%s) { %s } 0; })" (value c) (stmtFlat body)
@@ -566,11 +587,88 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
             | TVar (name, _) when Map.containsKey name topFuns -> valueTopCall name args (Typer.resolveTy (tyOf e))
             | _ -> valueClosureApply e
 
+    /// A local recursive function: the closure is stored in a heap cell so the
+    /// function can refer to itself. Captures inside the lambda see the cell by
+    /// pointer (ScopeEntry.Cell), and the body dereferences it.
+    and recCellSetup (n: string) (ty: Ty) : string * ScopeEntry =
+        let cl = ctypeArg ty
+        let cell = freshTemp ()
+        let entry = { CName = "(*" + cell + ")"; Ty = ty; Mutable = false; Cell = Some cell }
+        (cl + "* " + cell + " = (" + cl + "*)fs_alloc(sizeof(" + cl + ")); ", entry)
+
+    and valueRecLet (n: string) (ty: Ty) (bound: TExpr) (body: TExpr) : string =
+        let (head, entry) = recCellSetup n ty
+        let cell = match entry.Cell with Some c -> c | None -> failwith "rec cell"
+        let old = Map.tryFind n scope
+        scope <- Map.add n entry scope
+        let boundV = value bound
+        let assign = "*" + cell + " = " + boundV + "; "
+        let bodyV = value body
+        scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
+        "({ " + head + assign + bodyV + "; })"
+
+    and stmtRecLet (n: string) (ty: Ty) (bound: TExpr) (body: TExpr) : string =
+        let (head, entry) = recCellSetup n ty
+        let cell = match entry.Cell with Some c -> c | None -> failwith "rec cell"
+        let old = Map.tryFind n scope
+        scope <- Map.add n entry scope
+        let boundV = value bound
+        let assign = "*" + cell + " = " + boundV + "; "
+        let bodyS = stmtFlat body
+        scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
+        "{ " + head + assign + bodyS + " }"
+
+    /// A group of mutually recursive local functions: one cell per function,
+    /// all in scope before any of them is emitted, so the closures can refer
+    /// to each other through their cells.
+    and recGroupPieces (bs: (string * Ty * TExpr) list) : string * (string * ScopeEntry) list =
+        let pieces = bs |> List.map (fun (n, ty, _) -> let (d, e) = recCellSetup n ty in (d, (n, e)))
+        (pieces |> List.map fst |> String.concat "", pieces |> List.map snd)
+
+    and recGroupAssigns (bs: (string * Ty * TExpr) list) (entries: (string * ScopeEntry) list) : string list =
+        List.map2
+            (fun (_, _, bnd) (_, entry) ->
+                match entry.Cell with
+                | Some cell -> "*" + cell + " = " + value bnd + ";"
+                | None -> failwith "rec group cell")
+            bs entries
+
+    and valueRecGroup (bs: (string * Ty * TExpr) list) (body: TExpr) : string =
+        let (decls, entries) = recGroupPieces bs
+        let old = entries |> List.map (fun (n, _) -> n, Map.tryFind n scope)
+        scope <- entries |> List.fold (fun sc (n, e) -> Map.add n e sc) scope
+        let assigns = recGroupAssigns bs entries
+        let bodyV = value body
+        scope <- old |> List.fold (fun sc (n, o) -> match o with Some e -> Map.add n e sc | None -> Map.remove n sc) scope
+        "({ " + decls + String.concat " " assigns + " " + bodyV + "; })"
+
+    and stmtRecGroup (bs: (string * Ty * TExpr) list) (body: TExpr) : string =
+        let (decls, entries) = recGroupPieces bs
+        let old = entries |> List.map (fun (n, _) -> n, Map.tryFind n scope)
+        scope <- entries |> List.fold (fun sc (n, e) -> Map.add n e sc) scope
+        let assigns = recGroupAssigns bs entries
+        let bodyS = stmtFlat body
+        scope <- old |> List.fold (fun sc (n, o) -> match o with Some e -> Map.add n e sc | None -> Map.remove n sc) scope
+        "{ " + decls + String.concat " " assigns + " " + bodyS + " }"
+
+    and emitRecGroup (bs: (string * Ty * TExpr) list) (body: TExpr) : unit =
+        let (decls, entries) = recGroupPieces bs
+        let old = entries |> List.map (fun (n, _) -> n, Map.tryFind n scope)
+        line "{"
+        level <- level + 1
+        line decls
+        scope <- entries |> List.fold (fun sc (n, e) -> Map.add n e sc) scope
+        for a in recGroupAssigns bs entries do line a
+        line (stmtFlat body)
+        scope <- old |> List.fold (fun sc (n, o) -> match o with Some e -> Map.add n e sc | None -> Map.remove n sc) scope
+        level <- level - 1
+        line "}"
+
     and valueLet (n: string) (ty: Ty) (bound: TExpr) (body: TExpr) (mutableFlag: bool) : string =
         let bv = value bound
         let cn = freshName n
         let old = Map.tryFind n scope
-        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag } scope
+        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag; Cell = None } scope
         let bodyV = value body
         scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
         sprintf "({ %s %s = %s; %s; })" (ctypeArg ty) cn bv bodyV
@@ -579,7 +677,8 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         match e with
         | TSeq (_, items) -> items |> List.map stmtFlat |> String.concat " "
         | TLet (n, ty, bound, body) -> stmtLet n ty bound body false
-        | TLetRec (n, ty, bound, body) -> stmtLet n ty bound body false
+        | TLetRec (n, ty, bound, body) -> stmtRecLet n ty bound body
+        | TLetRecGroup (bs, body) -> stmtRecGroup bs body
         | TLetMutable (n, ty, bound, body) -> stmtLet n ty bound body true
         | TAssign (n, e) -> sprintf "%s = %s;" (resolve n) (value e)
         | TWhile (c, body) -> sprintf "while (%s) { %s }" (value c) (stmtFlat body)
@@ -610,7 +709,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         let bv = value bound
         let cn = freshName n
         let old = Map.tryFind n scope
-        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag } scope
+        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag; Cell = None } scope
         let bodyS = stmtFlat body
         scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
         sprintf "{ %s %s = %s; %s }" (ctypeArg ty) cn bv bodyS
@@ -655,6 +754,10 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         | "float", [ a ] -> "((double)(" + value a + "))"
         | "int", [ a ] -> "double_to_int(" + value a + ")"
         | "string", [ a ] -> "int_to_string(" + value a + ")"
+        | "__op_append", [ a; b ] ->
+            (match Typer.resolveTy (tyOf a) with
+             | TNamed ("list", [ e ]) -> appendList e + "(" + value a + ", " + value b + ")"
+             | _ -> failwith "append: expected lists")
         | "string_of_int", [ a ] -> "int_to_string(" + value a + ")"
         | "string_of_bool", [ a ] -> "bool_to_string(" + value a + ")"
         | "sqrt", [ a ] -> "sqrt(" + value a + ")"
@@ -703,6 +806,10 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         | "float", [ a ] -> "(void)((double)(" + value a + "));"
         | "int", [ a ] -> "(void)double_to_int(" + value a + ");"
         | "string", [ a ] -> "(void)int_to_string(" + value a + ");"
+        | "__op_append", [ a; b ] ->
+            (match Typer.resolveTy (tyOf a) with
+             | TNamed ("list", [ e ]) -> "(void)" + appendList e + "(" + value a + ", " + value b + ");"
+             | _ -> failwith "append: expected lists")
         | "string_of_int", [ a ] -> "(void)int_to_string(" + value a + ");"
         | "string_of_bool", [ a ] -> "(void)bool_to_string(" + value a + ");"
         | "sqrt", [ a ] -> "(void)sqrt(" + value a + ");"
@@ -872,6 +979,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
             |> List.mapi (fun i (_, entry) ->
                 let baseT = ctypeArg entry.Ty
                 if entry.Mutable then baseT + "* " + fieldN i + ";"
+                elif entry.Cell.IsSome then baseT + "* " + fieldN i + ";"
                 else baseT + " " + fieldN i + ";")
             |> String.concat " "
         typedefBuf.Add("typedef struct { " + fields + " } " + envT id + ";")
@@ -881,11 +989,12 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
 
         let thunkBody =
             withScope
-                ((param, { CName = "p"; Ty = pt; Mutable = false })
+                ((param, { CName = "p"; Ty = pt; Mutable = false; Cell = None })
                  :: (captured
                      |> List.mapi (fun i (v, entry) ->
-                         if entry.Mutable then (v, { CName = "(*" + evf i + ")"; Ty = entry.Ty; Mutable = true })
-                         else (v, { CName = evf i; Ty = entry.Ty; Mutable = false }))))
+                         if entry.Mutable then (v, { CName = "(*" + evf i + ")"; Ty = entry.Ty; Mutable = true; Cell = None })
+                         elif entry.Cell.IsSome then (v, { CName = "(*" + evf i + ")"; Ty = entry.Ty; Mutable = false; Cell = None })
+                         else (v, { CName = evf i; Ty = entry.Ty; Mutable = false; Cell = None }))))
                 (fun () ->
                     if retC = "void" then stmtFlat body
                     else "return " + value body + ";")
@@ -897,7 +1006,10 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
             captured
             |> List.mapi (fun i (_, entry) ->
                 if entry.Mutable then evf i + " = &" + entry.CName + ";"
-                else evf i + " = " + entry.CName + ";")
+                else
+                    match entry.Cell with
+                    | Some cell -> evf i + " = " + cell + ";"
+                    | None -> evf i + " = " + entry.CName + ";")
             |> String.concat " "
 
         "({ " + envT id + "* " + ev + " = fs_alloc(sizeof(" + envT id + ")); " + inits + " (" + closureTy + "){ .fn = " + thunkT id + ", .env = " + ev + " }; })"
@@ -944,7 +1056,8 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         match e with
         | TSeq (_, items) -> List.iter emitStmt items
         | TLet (n, ty, bound, body) -> emitLet n ty bound body false
-        | TLetRec (n, ty, bound, body) -> emitLet n ty bound body false
+        | TLetRec (n, ty, bound, body) -> emitRecLet n ty bound body
+        | TLetRecGroup (bs, body) -> emitRecGroup bs body
         | TLetMutable (n, ty, bound, body) -> emitLet n ty bound body true
         | TAssign (n, e) -> line (sprintf "%s = %s;" (resolve n) (value e))
         | TWhile (c, body) ->
@@ -965,6 +1078,20 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
             line "}"
         | _ -> line (stmtFlat e)
 
+    and emitRecLet (n: string) (ty: Ty) (bound: TExpr) (body: TExpr) : unit =
+        let (head, entry) = recCellSetup n ty
+        let cell = match entry.Cell with Some c -> c | None -> failwith "rec cell"
+        let old = Map.tryFind n scope
+        line "{"
+        level <- level + 1
+        line head
+        scope <- Map.add n entry scope
+        line (sprintf "*%s = %s;" cell (value bound))
+        emitStmt body
+        scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
+        level <- level - 1
+        line "}"
+
     and emitLet (n: string) (ty: Ty) (bound: TExpr) (body: TExpr) (mutableFlag: bool) : unit =
         let bv = value bound
         let cn = freshName n
@@ -972,7 +1099,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         line "{"
         level <- level + 1
         line (sprintf "%s %s = %s;" (ctypeArg ty) cn bv)
-        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag } scope
+        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag; Cell = None } scope
         emitStmt body
         scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
         level <- level - 1
@@ -1007,7 +1134,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         let cn = freshName n
         let old = Map.tryFind n scope
         line (sprintf "%s %s = %s;" (ctypeArg ty) cn bv)
-        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag } scope
+        scope <- Map.add n { CName = cn; Ty = ty; Mutable = mutableFlag; Cell = None } scope
         emitTailReturn body
         scope <- (match old with Some o -> Map.add n o scope | None -> Map.remove n scope)
 
@@ -1349,7 +1476,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         let savedLevel = level
         level <- 1
         let paramScope =
-            paramInfos |> List.mapi (fun i (pn, pt) -> pn, { CName = "p" + string i; Ty = pt; Mutable = false })
+            paramInfos |> List.mapi (fun i (pn, pt) -> pn, { CName = "p" + string i; Ty = pt; Mutable = false; Cell = None })
         withScope paramScope (fun () ->
             if Typer.resolveTy r = UnitTy then emitStmt body
             else emitTailReturn body)
@@ -1404,7 +1531,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         match prog.MainArg with
         | Some argName ->
             let ln = listName StringTy
-            scope <- Map.add argName { CName = "v_" + argName; Ty = TNamed("list", [ StringTy ]); Mutable = false } scope
+            scope <- Map.add argName { CName = "v_" + argName; Ty = TNamed("list", [ StringTy ]); Mutable = false; Cell = None } scope
             line (sprintf "%s* v_%s = NULL;" ln argName)
             line (sprintf "{ int32_t i = argc - 1; while (i >= 0) { %s* n = (%s*)fs_alloc(sizeof(%s)); n->head = (fsstring_t){ .len = (int32_t)strlen(argv[i]), .data = argv[i] }; n->tail = v_%s; v_%s = n; i = i - 1; } }" ln ln ln argName argName)
         | None -> ()

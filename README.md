@@ -20,7 +20,14 @@ Implemented so far (v0.2):
 - `int` (32-bit), `bool`, `unit`, function types `t -> u`
 - arithmetic `+ - * / %`, comparison `= <> < <= > >=`, logic `&& || not`, negation `-`
 - `if / then / else` (statement and expression), `if / then` (unit if), `while / do`
+- `for i = a to b do`, `for i = a downto b do`, `for x in xs do` (lowered to
+  `let`/`while`/`match`, so nothing else in the compiler needs to know)
+- pipes: `x |> f` and `f <| x` (F# precedence: looser than arithmetic and
+  comparisons, tighter than `&&`/`||`)
+- list append `@` (an iterative per-element-type spine copy, not recursion)
 - `let ... in ...`, `let mutable ... in ...`, `<-`
+- local `let rec` and mutual `let rec ... and ...` (each local function is
+  stored in a heap cell so the closures can refer to each other)
 - functions with a `unit` parameter: `let f () = ...`, `fun () -> ...`
 - top-level functions as values (`let g = id`, `twice f`), eta-expanded
 - functions: `let f x y = ...`, `let rec f x = ...`, lambdas `fun x -> ...`, application `f x`
@@ -55,8 +62,9 @@ Implemented so far (v0.2):
   so any C library is callable; `[<Export>]` + `--lib` builds a `.so`/`.dll`
   with a generated header, so C can call fss
 
-Not yet: arrays, type annotations, local `let rec` and `and`, full `sprintf`,
-`try/finally`, `raise`. These are the next milestones in `DESIGN.md`.
+Not yet: arrays, range syntax (`for i in 1 .. 10`), full `sprintf`/`printfn`,
+`try/finally`, `raise`, and the `List`/`Seq`/`Option` modules (see
+`fss scan`). These are the next milestones in `DESIGN.md`.
 
 Top-level mutual recursion is supported: `let rec even n = … and odd n = …`.
 
@@ -65,7 +73,6 @@ Top-level mutual recursion is supported: `let rec even n = … and odd n = …`.
 - Top-level bindings are polymorphic (Hindley-Milner let-polymorphism) and
   monomorphized per use. Local `let` bindings stay monomorphic — hoist them to
   top level if you need polymorphism.
-- Local `let rec` is rejected; define recursive functions at top level.
 - Top-level functions work as values (`let g = id`, `twice greet`): they are
   eta-expanded into closures. Partially applied forms work too (`add 10`).
 - `let f () = ...` and `fun () -> ...` take a real `unit` parameter.

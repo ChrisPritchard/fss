@@ -65,6 +65,7 @@ let monomorphize (tprog: TProgram) : Program =
         | TIf (t, c, a, b) -> TIf(rt t, specE subst c, specE subst a, specE subst b)
         | TLet (n, t, v, b) -> TLet(n, rt t, specE subst v, specE subst b)
         | TLetRec (n, t, v, b) -> TLetRec(n, rt t, specE subst v, specE subst b)
+        | TLetRecGroup (bs, b) -> TLetRecGroup(bs |> List.map (fun (n, t, v) -> (n, rt t, specE subst v)), specE subst b)
         | TLetMutable (n, t, v, b) -> TLetMutable(n, rt t, specE subst v, specE subst b)
         | TAssign (n, x) -> TAssign(n, specE subst x)
         | TWhile (c, b) -> TWhile(specE subst c, specE subst b)

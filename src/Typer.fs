@@ -17,6 +17,7 @@ type TExpr =
     | TIf of Ty * TExpr * TExpr * TExpr
     | TLet of string * Ty * TExpr * TExpr
     | TLetRec of string * Ty * TExpr * TExpr
+    | TLetRecGroup of (string * Ty * TExpr) list * TExpr
     | TLetMutable of string * Ty * TExpr * TExpr
     | TAssign of string * TExpr
     | TWhile of TExpr * TExpr
@@ -76,6 +77,7 @@ let rec tyOf (e: TExpr) : Ty =
     | TIf (t, _, _, _) -> t
     | TLet (_, _, _, body) -> tyOf body
     | TLetRec (_, _, _, body) -> tyOf body
+    | TLetRecGroup (_, body) -> tyOf body
     | TLetMutable (_, _, _, body) -> tyOf body
     | TAssign _ -> UnitTy
     | TWhile _ -> UnitTy
@@ -236,6 +238,10 @@ let private builtinEnv : Map<string, Binding> =
         "int", { Scheme = Scheme([], FunTy(DoubleTy, IntTy)); Mutable = false }
         // F#-compatible string conversions.
         "string_of_int", { Scheme = Scheme([], FunTy(IntTy, StringTy)); Mutable = false }
+        "__op_append", { Scheme = Scheme([999998],
+                        FunTy(TNamed("list", [ TyVar 999998 ]),
+                              FunTy(TNamed("list", [ TyVar 999998 ]),
+                                    TNamed("list", [ TyVar 999998 ])))); Mutable = false }
         "string", { Scheme = Scheme([], FunTy(IntTy, StringTy)); Mutable = false }
         "string_of_bool", { Scheme = Scheme([], FunTy(BoolTy, StringTy)); Mutable = false }
     ]
@@ -389,7 +395,37 @@ let rec private infer (env: Map<string, Binding>) (typeDefs: Map<string, TypeDef
         let (tb, tbExpr) = infer (Map.add n { Scheme = Scheme([], tv); Mutable = false } env) typeDefs caseInfo b
         (tb, TLet(n, tv, tvExpr, tbExpr))
 
-    | LetRec (n, _, _) -> err ("local 'let rec' is not supported yet; move '" + n + "' to top level")
+    | LetRecGroup (binds, b) ->
+        for (n, _) in binds do
+            if Map.containsKey n env then err ("duplicate definition of '" + n + "'")
+        let ftvs = binds |> List.map (fun (n, _) -> n, freshVar ())
+        let env' =
+            List.fold (fun e (n, ftv) -> Map.add n { Scheme = Scheme([], ftv); Mutable = false } e) env ftvs
+        let typed =
+            binds
+            |> List.map (fun (n, expr) ->
+                let (t, te) = infer env' typeDefs caseInfo expr
+                let ftv = ftvs |> List.find (fun (m, _) -> m = n) |> snd
+                unify ftv t
+                (n, t, te))
+        for (n, t, _) in typed do
+            match resolveTy t with
+            | FunTy _ -> ()
+            | _ -> err ("'let rec' value '" + n + "' must be a function")
+        let (tb, tbExpr) = infer env' typeDefs caseInfo b
+        (tb, TLetRecGroup(typed, tbExpr))
+
+    | LetRec (n, v, b) ->
+        if Map.containsKey n env then err ("duplicate definition of '" + n + "'")
+        let ftv = freshVar ()
+        let env' = Map.add n { Scheme = Scheme([], ftv); Mutable = false } env
+        let (tv, tvExpr) = infer env' typeDefs caseInfo v
+        unify ftv tv
+        match resolveTy tv with
+        | FunTy _ -> ()
+        | _ -> err ("'let rec' value '" + n + "' must be a function")
+        let (tb, tbExpr) = infer env' typeDefs caseInfo b
+        (tb, TLetRec(n, tv, tvExpr, tbExpr))
 
     | LetMutable (n, v, b) ->
         let (tv, tvExpr) = infer env typeDefs caseInfo v

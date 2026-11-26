@@ -2,7 +2,7 @@ module Fss.Parser
 
 open Fss.Ast
 
-type P = { Toks: Lexer.Token array; mutable Idx: int; mutable Opens: string list; mutable Includes: string list; mutable Links: string list; mutable Exports: (string * string) list }
+type P = { Toks: Lexer.Token array; mutable Idx: int; mutable Opens: string list; mutable Includes: string list; mutable Links: string list; mutable Exports: (string * string) list; mutable Fresh: int }
 
 let peek (p: P) : Lexer.Token = p.Toks.[p.Idx]
 
@@ -283,6 +283,8 @@ and parseStmt (p: P) : Expr =
         let b = parseStmt p
         While(c, b)
 
+    | Lexer.For -> parseFor p
+
     | Lexer.Match -> parseMatch p
 
     | Lexer.Try -> parseTry p
@@ -330,11 +332,31 @@ and parseStmt (p: P) : Expr =
                     failwith ("line " + string (peek p).Line + ": expected '=' or function parameters after '" + name + "'")
                 expect p Lexer.Eq
                 let fnBody = parseStmt p
-                expect p Lexer.In
-                let body = parseStmt p
                 let fn = List.foldBack (fun (pn, an) b -> Fun(pn, an, b)) ps fnBody
-                if recFlag then LetRec(name, fn, body)
-                else Let(name, fn, body)
+                if recFlag && (peek p).Kind = Lexer.AndKw then
+                    let rec andLoop acc =
+                        if (peek p).Kind = Lexer.AndKw then
+                            advance p |> ignore
+                            match (peek p).Kind with
+                            | Lexer.Ident bn ->
+                                advance p |> ignore
+                                let bps = paramsLoop []
+                                if List.isEmpty bps then
+                                    failwith ("line " + string (peek p).Line + ": expected parameters after 'and " + bn + "'")
+                                expect p Lexer.Eq
+                                let bbody = parseStmt p
+                                andLoop ((bn, List.foldBack (fun (pn, an) b -> Fun(pn, an, b)) bps bbody) :: acc)
+                            | k -> failwith ("line " + string (peek p).Line + ": expected name after 'and', found " + Lexer.tokKindName k)
+                        else List.rev acc
+                    let group = (name, fn) :: andLoop []
+                    expect p Lexer.In
+                    let body = parseStmt p
+                    LetRecGroup(group, body)
+                else
+                    expect p Lexer.In
+                    let body = parseStmt p
+                    if recFlag then LetRec(name, fn, body)
+                    else Let(name, fn, body)
         | k -> failwith ("line " + string (peek p).Line + ": expected name after 'let', found " + Lexer.tokKindName k)
 
     | Lexer.Ident name when (peek2 p).Kind = Lexer.Assign ->
@@ -398,6 +420,55 @@ and parseTry (p: P) : Expr =
 
     Try(body, armsLoop [])
 
+/// `for i = a to b do body`, `for i = a downto b do body` and
+/// `for x in xs do body`, lowered to `let`/`while`/`match` so the rest of the
+/// compiler needs to know nothing about them.
+and parseFor (p: P) : Expr =
+    let fresh (stem: string) =
+        p.Fresh <- p.Fresh + 1
+        stem + "__" + string p.Fresh
+    advance p |> ignore
+    match (peek p).Kind with
+    | Lexer.Ident v ->
+        advance p |> ignore
+        match (peek p).Kind with
+        | Lexer.Eq ->
+            advance p |> ignore
+            let startE = parseOr p
+            let up =
+                match (peek p).Kind with
+                | Lexer.To -> advance p |> ignore; true
+                | Lexer.Downto -> advance p |> ignore; false
+                | k -> failwith ("line " + string (peek p).Line + ": expected 'to' or 'downto', found " + Lexer.tokKindName k)
+            let limitE = parseOr p
+            expect p Lexer.Do
+            let body = parseStmt p
+            let loN = fresh "lo"
+            let hiN = fresh "hi"
+            let cmp = if up then Le else Ge
+            let step = if up then Binary(Add, Var v, Int 1L) else Binary(Sub, Var v, Int 1L)
+            Let(loN, startE,
+                Let(hiN, limitE,
+                    LetMutable(v, Var loN,
+                        While(Binary(cmp, Var v, Var hiN),
+                              Seq [ body; Assign(v, step) ]))))
+        | Lexer.In ->
+            advance p |> ignore
+            let srcE = parseOr p
+            expect p Lexer.Do
+            let body = parseStmt p
+            let restN = fresh "rest"
+            let goN = fresh "go"
+            let tlN = fresh "tl"
+            LetMutable(restN, srcE,
+                LetMutable(goN, Bool true,
+                    While(Var goN,
+                          Match(Var restN,
+                                [ (PNil, Assign(goN, Bool false))
+                                  (PCons(PVar v, PVar tlN), Seq [ Assign(restN, Var tlN); body ]) ]))))
+        | k -> failwith ("line " + string (peek p).Line + ": expected '=' or 'in' after 'for " + v + "', found " + Lexer.tokKindName k)
+    | k -> failwith ("line " + string (peek p).Line + ": expected loop variable after 'for', found " + Lexer.tokKindName k)
+
 and parseOr (p: P) : Expr =
     let mutable left = parseAnd p
     let mutable go = true
@@ -408,11 +479,29 @@ and parseOr (p: P) : Expr =
     left
 
 and parseAnd (p: P) : Expr =
+    let mutable left = parsePipe p
+    let mutable go = true
+    while go do
+        match (peek p).Kind with
+        | Lexer.And -> advance p |> ignore; left <- Binary(And, left, parsePipe p)
+        | _ -> go <- false
+    left
+
+/// `x |> f` is `f x` (left associative); `f <| x` is `f x` (right associative).
+/// Like F#, pipes bind looser than arithmetic and comparisons but tighter than
+/// `&&`/`||`.
+and parsePipe (p: P) : Expr =
     let mutable left = parseCmp p
     let mutable go = true
     while go do
         match (peek p).Kind with
-        | Lexer.And -> advance p |> ignore; left <- Binary(And, left, parseCmp p)
+        | Lexer.PipeRight ->
+            advance p |> ignore
+            left <- Apply(parseCmp p, left)
+        | Lexer.PipeLeft ->
+            advance p |> ignore
+            left <- Apply(left, parsePipe p)
+            go <- false
         | _ -> go <- false
     left
 
@@ -449,6 +538,7 @@ and parseAdd (p: P) : Expr =
         match (peek p).Kind with
         | Lexer.Plus -> advance p |> ignore; left <- Binary(Add, left, parseMul p)
         | Lexer.Minus -> advance p |> ignore; left <- Binary(Sub, left, parseMul p)
+        | Lexer.Append -> advance p |> ignore; left <- Apply(Apply(Var "__op_append", left), parseMul p)
         | _ -> go <- false
     left
 
@@ -691,7 +781,7 @@ let parseDef (p: P) : Def =
 
 let parse (src: string) : Program =
     let toks = Lexer.layout (Lexer.tokenize src)
-    let p = { Toks = Array.ofList toks; Idx = 0; Opens = []; Includes = []; Links = []; Exports = [] }
+    let p = { Toks = Array.ofList toks; Idx = 0; Opens = []; Includes = []; Links = []; Exports = []; Fresh = 0 }
 
     let rec loop types defs =
         match (peek p).Kind with

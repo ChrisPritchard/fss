@@ -505,13 +505,21 @@ fss build src/*.fs -o app         # multiple files, link them
    (`reverse`) in one multi-instantiation edge case, and the emitted C
    runtime lacks the .NET compiler's conservative GC and `try`/`with`
    exceptions (it uses `malloc`/`exit` instead).
-9. ~~**C interop**~~ — **done**. `double` is a first-class type;
+9. ~~**Language surface for real F# files**~~ — **done (v0.3)**: `|>`/`<|`
+   pipes, `@` list append, `for i = a to b` / `downto` / `for x in xs do`
+   (all lowered to existing constructs), local `let rec` and mutual
+   `let rec … and …` (closures held in heap cells so they can reference each
+   other), and layout-style local bindings with indented bodies.
+10. ~~**C interop**~~ — **done**. `double` is a first-class type;
    `extern name(p: t, ...) : ret` declares foreign C functions;
    `#include "h"` / `#include <h>` and `#link "lib"` (or the
    F#-compatible `[<Include("...")>]` / `[<Link("...")>]` attributes) pull in
-   headers and linker flags. Emitted as plain C `extern` prototypes, so there
-   is no marshalling layer. Raw C pointers / `char*` are not exposed yet.
-10. **Later**: arrays beyond 1-D, `seq`, Map/Set, computation expressions, the
+   headers and linker flags. Each extern becomes a small static wrapper over
+   the real C symbol, so headers with different const-ness do not clash;
+   `cstring` is a raw `char*`, and C function-pointer callbacks are supported.
+   `[<Export>]` + `fss build --lib` produces a `.so`/`.dll` plus a generated
+   header so C can call into fss.
+11. **Later**: arrays beyond 1-D, `seq`, Map/Set, computation expressions, the
    OO subset, wasm target, zero-copy record structs / opaque `ptr` types and
    C-function-pointer callbacks for interop.
 
