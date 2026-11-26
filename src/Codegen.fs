@@ -588,8 +588,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
             let (f, args) = collectApp e []
             match f with
             | TVar (name, _) when isBuiltin name -> builtinStmt name args
-            | TVar (name, _) when Map.containsKey name externFuns ->
-                "(void)fs_ext_" + name + "(" + (args |> List.map value |> String.concat ", ") + ");"
+            | TVar (name, _) when Map.containsKey name externFuns -> valueExternCall name args + ";"
             | TVar (name, _) when Map.containsKey name topFuns ->
                 let (ptys, _) = topFuns.[name]
                 if List.length args = List.length ptys then
@@ -691,9 +690,40 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
             let argStr = match args with [ a ] -> value a | _ -> failwith ("constructor arity: " + name)
             "({ " + tn + "* " + tv + " = (" + tn + "*)fs_alloc(sizeof(" + tn + ")); " + tv + "->tag = " + string tag + "; " + tv + "->u.u_" + name + " = " + argStr + "; " + tv + "; })"
 
+    /// A C function-pointer type for an `extern` parameter, or None if the
+    /// parameter is not a callback signature.
+    and externParamType (fname: string) (t: Ty) : string * bool =
+        match Typer.resolveTy t with
+        | FunTy _ ->
+            // Curried fss `int -> int -> int` becomes `int32_t (*)(int32_t, int32_t)`.
+            let rec split (t: Ty) (acc: Ty list) =
+                match Typer.resolveTy t with
+                | FunTy (a, b) -> split b (a :: acc)
+                | r -> (List.rev acc, r)
+            let (ps, rt) = split t []
+            let argC = ps |> List.map (exportCType fname) |> String.concat ", "
+            (exportCType fname rt + " (*)(" + argC + ")", true)
+        | other -> (exportCType fname other, false)
+
+    /// Emit an argument for an extern call. Callbacks must be named functions
+    /// (closures cannot be converted to bare C function pointers).
+    and externArg (fname: string) (isCallback: bool) (e: TExpr) : string =
+        if not isCallback then value e
+        else
+            match e with
+            | TVar (n, _) when Map.containsKey n externFuns -> "fs_ext_" + n
+            | TVar (n, _) when Map.containsKey n topFuns -> "v_" + n
+            | _ ->
+                failwith
+                    ("extern '" + fname + "' expects a C function pointer: pass a top-level function name"
+                     + " (a capturing lambda cannot be used here)")
+
     and valueExternCall (name: string) (args: TExpr list) : string =
         let (ptys, rt) = externFuns.[name]
-        let argStrs = args |> List.map value
+        let k = min (List.length args) (List.length ptys)
+        let argStrs =
+            List.map2 (fun (pty: Ty) a -> externArg name (snd (externParamType name pty)) a) (List.take k ptys) (List.take k args)
+            @ (args |> List.skip k |> List.map value)
         let n = List.length ptys
         let isUnit = Typer.resolveTy rt = UnitTy
         let cname = "fs_ext_" + name
@@ -1297,7 +1327,13 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
     // wrapper lets the C compiler apply the usual implicit conversions.
     let externDeclSb2 = StringBuilder()
     for (n, ps, r) in prog.Externs do
-        let args = ps |> List.mapi (fun i (_, t) -> ctypeArg t + " a" + string i) |> String.concat ", "
+        let args =
+            ps
+            |> List.mapi (fun i (_, t) ->
+                let (decl, isCb) = externParamType n t
+                if isCb then decl.Replace("(*)", "(* a" + string i + ")")
+                else decl + " a" + string i)
+            |> String.concat ", "
         let argNames = ps |> List.mapi (fun i _ -> "a" + string i) |> String.concat ", "
         let body =
             if Typer.resolveTy r = UnitTy then sprintf "{ %s(%s); }" n argNames

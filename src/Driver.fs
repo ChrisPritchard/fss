@@ -15,8 +15,15 @@ let private compileC (cc: string) (opt: string) (marchNative: bool) (links: stri
     let march = if marchNative then "-march=native " else ""
     let psi = ProcessStartInfo()
     psi.FileName <- cc
-    let linkFlags = links |> List.map (fun l -> " -l" + l) |> String.concat ""
-    psi.Arguments <- opt + " -fwrapv -Wl,--stack,67108864 " + march + "-o \"" + outPath + "\" \"" + cPath + "\"" + linkFlags
+    // A bare name is a library (`-lm`); a path/file is passed straight to the
+    // compiler so `#link "helpers.c"` / `#link "libfoo.a"` also work.
+    let linkFlags =
+        links
+        |> List.map (fun l ->
+            if l.Contains("/") || l.Contains("\\") || l.Contains(".") then " \"" + l + "\""
+            else " -l" + l)
+        |> String.concat ""
+    psi.Arguments <- opt + " -I. -fwrapv -Wl,--stack,67108864 " + march + "-o \"" + outPath + "\" \"" + cPath + "\"" + linkFlags
     psi.UseShellExecute <- false
     psi.RedirectStandardError <- true
     psi.RedirectStandardOutput <- true

@@ -234,6 +234,32 @@ Only C-compatible types can cross an `[<Export>]` boundary: `int`, `bool`,
 `double`, `cstring`, `unit`. Exposing `string`/lists/records is a compile
 error with a clear message (use `cstring` instead).
 
+### C callbacks (passing fss functions to C)
+
+An `extern` parameter with a function type is a C function pointer, and a
+top-level fss function can be passed directly:
+
+```fsharp
+#include "callbacks.h"
+#link "callbacks.c"          // a .c/.o/.a path is passed straight to the compiler
+
+extern apply(f: (int -> int), x: int) : int
+extern each(f: (int -> unit), n: int) : unit
+
+let doubleIt x = x * 2
+let show i = print_int i
+
+let main () =
+    println (apply doubleIt 21)   // 42
+    each show 4                   // 0123
+    0
+```
+
+Curried fss functions flatten to C signatures (`int -> int -> int` becomes
+`int32_t (*)(int32_t, int32_t)`). Only *named* top-level functions can be
+passed as callbacks — a capturing lambda cannot be turned into a bare C
+function pointer, and that is a compile error with an explanation.
+
 `double` is a first-class type in fss (`1.5`, `sqrt`, `/`), with
 `int_to_double`, `double_to_int`, `double_to_string`, and `print_double` /
 `println` support. `%` is rejected on `double` (use `fmod` via `extern`).
