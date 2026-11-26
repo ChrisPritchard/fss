@@ -64,6 +64,18 @@ let private resolveValueName (full: string) : string option =
     | "System.Console.ReadLine" | "Console.ReadLine" -> Some "read_line"
     | "System.IO.File.ReadAllText" | "File.ReadAllText" -> Some "read_file"
     | "System.IO.File.WriteAllText" | "File.WriteAllText" -> Some "write_file"
+    // System.Math -> the libm-backed builtins, so a `Math.*` program compiles
+    // unchanged under both F# and fss.
+    | "System.Math.Sqrt" | "Math.Sqrt" -> Some "sqrt"
+    | "System.Math.Sin" | "Math.Sin" -> Some "sin"
+    | "System.Math.Cos" | "Math.Cos" -> Some "cos"
+    | "System.Math.Tan" | "Math.Tan" -> Some "tan"
+    | "System.Math.Log" | "Math.Log" -> Some "log"
+    | "System.Math.Exp" | "Math.Exp" -> Some "exp"
+    | "System.Math.Floor" | "Math.Floor" -> Some "floor"
+    | "System.Math.Ceiling" | "Math.Ceiling" -> Some "ceil"
+    | "System.Math.Pow" | "Math.Pow" -> Some "pow"
+    | "System.Math.Abs" | "Math.Abs" -> Some "abs_double"
     | _ -> None
 
 /// Map a (possibly namespace-qualified) .NET type name to a builtin fss type.

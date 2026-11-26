@@ -220,6 +220,17 @@ let private builtinEnv : Map<string, Binding> =
         "cstring_null", { Scheme = Scheme([], FunTy(UnitTy, CStrTy)); Mutable = false }
         "cstring_is_null", { Scheme = Scheme([], FunTy(CStrTy, BoolTy)); Mutable = false }
         "cstring_len", { Scheme = Scheme([], FunTy(CStrTy, IntTy)); Mutable = false }
+        "sqrt", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
+        "sin", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
+        "cos", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
+        "tan", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
+        "log", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
+        "exp", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
+        "floor", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
+        "ceil", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
+        "abs_double", { Scheme = Scheme([], FunTy(DoubleTy, DoubleTy)); Mutable = false }
+        "abs_int", { Scheme = Scheme([], FunTy(IntTy, IntTy)); Mutable = false }
+        "pow", { Scheme = Scheme([], FunTy(DoubleTy, FunTy(DoubleTy, DoubleTy))); Mutable = false }
     ]
 
 let private buildCaseInfo (types: (string * TypeDef) list) : Map<string, string * Ty> =

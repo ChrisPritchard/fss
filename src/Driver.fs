@@ -17,12 +17,15 @@ let private compileC (cc: string) (opt: string) (marchNative: bool) (links: stri
     psi.FileName <- cc
     // A bare name is a library (`-lm`); a path/file is passed straight to the
     // compiler so `#link "helpers.c"` / `#link "libfoo.a"` also work.
+    // libm is used by the math builtins and is not implicit on glibc.
+    let extra = if System.OperatingSystem.IsWindows() then "" else " -lm"
     let linkFlags =
-        links
-        |> List.map (fun l ->
-            if l.Contains("/") || l.Contains("\\") || l.Contains(".") then " \"" + l + "\""
-            else " -l" + l)
-        |> String.concat ""
+        extra
+        + (links
+           |> List.map (fun l ->
+               if l.Contains("/") || l.Contains("\\") || l.Contains(".") then " \"" + l + "\""
+               else " -l" + l)
+           |> String.concat "")
     psi.Arguments <- opt + " -I. -fwrapv -Wl,--stack,67108864 " + march + "-o \"" + outPath + "\" \"" + cPath + "\"" + linkFlags
     psi.UseShellExecute <- false
     psi.RedirectStandardError <- true

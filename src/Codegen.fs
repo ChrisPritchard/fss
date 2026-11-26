@@ -652,6 +652,17 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         | "cstring_null", [ _ ] -> "((char*)0)"
         | "cstring_is_null", [ a ] -> "(" + value a + " == (char*)0)"
         | "cstring_len", [ a ] -> "((int32_t)strlen(" + value a + "))"
+        | "sqrt", [ a ] -> "sqrt(" + value a + ")"
+        | "sin", [ a ] -> "sin(" + value a + ")"
+        | "cos", [ a ] -> "cos(" + value a + ")"
+        | "tan", [ a ] -> "tan(" + value a + ")"
+        | "log", [ a ] -> "log(" + value a + ")"
+        | "exp", [ a ] -> "exp(" + value a + ")"
+        | "floor", [ a ] -> "floor(" + value a + ")"
+        | "ceil", [ a ] -> "ceil(" + value a + ")"
+        | "abs_double", [ a ] -> "fabs(" + value a + ")"
+        | "abs_int", [ a ] -> "fs_abs_int(" + value a + ")"
+        | "pow", [ a; b ] -> "pow(" + value a + ", " + value b + ")"
         | _ -> failwith ("bad builtin call: " + name)
 
     and builtinStmt (name: string) (args: TExpr list) : string =
@@ -684,6 +695,17 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         | "cstring_null", [ _ ] -> "(void)0;"
         | "cstring_is_null", [ a ] -> "(void)(" + value a + ");"
         | "cstring_len", [ a ] -> "(void)strlen(" + value a + ");"
+        | "sqrt", [ a ] -> "(void)sqrt(" + value a + ");"
+        | "sin", [ a ] -> "(void)sin(" + value a + ");"
+        | "cos", [ a ] -> "(void)cos(" + value a + ");"
+        | "tan", [ a ] -> "(void)tan(" + value a + ");"
+        | "log", [ a ] -> "(void)log(" + value a + ");"
+        | "exp", [ a ] -> "(void)exp(" + value a + ");"
+        | "floor", [ a ] -> "(void)floor(" + value a + ");"
+        | "ceil", [ a ] -> "(void)ceil(" + value a + ");"
+        | "abs_double", [ a ] -> "(void)fabs(" + value a + ");"
+        | "abs_int", [ a ] -> "(void)fs_abs_int(" + value a + ");"
+        | "pow", [ a; b ] -> "(void)pow(" + value a + ", " + value b + ");"
         | _ -> failwith ("bad builtin call: " + name)
 
     and valueCtor (name: string) (args: TExpr list) : string =
@@ -988,6 +1010,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         "#include <stdlib.h>\n" +
         "#include <string.h>\n" +
         "#include <setjmp.h>\n" +
+        "#include <math.h>\n" +
         "\n" +
         "typedef struct { int32_t len; char* data; } fsstring_t;\n" +
         "\n" +
@@ -1188,6 +1211,7 @@ let emitWith (library: bool) (prog: Fss.Mono.Program) : string =
         "}\n" +
         "static void print_double(double d) { fsstring_t s = double_to_string(d); print_string(s); }\n" +
         "static int32_t double_to_int(double d) { return (int32_t)d; }\n" +
+        "static int32_t fs_abs_int(int32_t x) { return x < 0 ? -x : x; }\n" +
         "static fsstring_t fs_string_of_cstr(const char* s) {\n" +
         "    if (s == (const char*)0) { fsstring_t z; z.len = 0; z.data = (char*)fs_alloc(1); z.data[0] = 0; return z; }\n" +
         "    int32_t n = (int32_t)strlen(s);\n" +

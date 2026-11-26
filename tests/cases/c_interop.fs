@@ -2,7 +2,7 @@
 #include "math.h"
 #link "m"
 
-extern sqrt(x: double) : double
+extern cbrt(x: double) : double
 extern fabs(x: double) : double
 extern abs(x: int) : int
 
@@ -15,6 +15,7 @@ let main () =
     println r
     println (fabs (-3.5))
     println (abs (-7))
+    println (cbrt 27.0)
     println (sqrt 2.0 * sqrt 2.0)
     println (gcd 48 18)
     println (double_to_string (r / 5.0))

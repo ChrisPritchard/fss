@@ -2,7 +2,7 @@
 // from C with the C types declared in the generated mathlib.h.
 #include <math.h>
 #link "m"
-extern sqrt(x: double) : double
+
 
 [<Export>]
 let add x y = x + y
