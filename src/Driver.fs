@@ -42,6 +42,10 @@ let private compileC (cc: string) (opt: string) (marchNative: bool) (links: stri
 
 let private runBuild (srcPaths: string list) (out: string) (keepC: bool) (cc: string) (opt: string) (marchNative: bool) (library: bool) : int =
     let progs = srcPaths |> List.map (fun p -> File.ReadAllText p |> Fss.Parser.parse)
+    // The prelude (a small standard library written in fss) is prepended to
+    // every program, so List/Option/String functions are always in scope.
+    let prelude = Fss.Parser.parse Fss.Prelude.source
+    let progs = prelude :: progs
     let prog : Fss.Ast.Program =
         { Types = progs |> List.collect (fun p -> p.Types)
           Defs = progs |> List.collect (fun p -> p.Defs)

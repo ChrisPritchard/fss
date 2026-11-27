@@ -56,6 +56,58 @@ let private parseDottedName (p: P) : string =
         sb.ToString()
     | k -> failwith ("line " + string (peek p).Line + ": expected name, found " + Lexer.tokKindName k)
 
+/// Modules implemented by the fss prelude (`src/Prelude.fs`). The parser
+/// rewrites `List.map` and friends to the mangled prelude names, so the
+/// library is ordinary fss code that is monomorphised per use.
+let private preludeModules = Set.ofList [ "List"; "Option"; "String" ]
+
+let private moduleFns =
+    [ "List.length", "__list_length"
+      "List.isEmpty", "__list_isEmpty"
+      "List.head", "__list_head"
+      "List.tail", "__list_tail"
+      "List.tryHead", "__list_tryHead"
+      "List.exactlyOne", "__list_exactlyOne"
+      "List.map", "__list_map"
+      "List.mapi", "__list_mapi"
+      "List.filter", "__list_filter"
+      "List.fold", "__list_fold"
+      "List.foldBack", "__list_foldBack"
+      "List.iter", "__list_iter"
+      "List.exists", "__list_exists"
+      "List.forall", "__list_forall"
+      "List.contains", "__list_contains"
+      "List.find", "__list_find"
+      "List.tryFind", "__list_tryFind"
+      "List.rev", "__list_rev"
+      "List.append", "__list_append"
+      "List.concat", "__list_concat"
+      "List.choose", "__list_choose"
+      "List.take", "__list_take"
+      "List.truncate", "__list_take"
+      "List.skip", "__list_skip"
+      "List.item", "__list_item"
+      "List.tryItem", "__list_tryItem"
+      "List.zip", "__list_zip"
+      "List.unzip", "__list_unzip"
+      "List.distinct", "__list_distinct"
+      "Option.map", "__option_map"
+      "Option.defaultValue", "__option_defaultValue"
+      "Option.defaultWith", "__option_defaultWith"
+      "Option.isSome", "__option_isSome"
+      "Option.isNone", "__option_isNone"
+      "Option.bind", "__option_bind"
+      "Option.iter", "__option_iter"
+      "Option.filter", "__option_filter"
+      "Option.toList", "__option_toList"
+      "String.length", "str_len"
+      "String.isEmpty", "__string_isEmpty"
+      "String.concat", "__string_concat"
+      // `Option.None` / `Option.Some` are just the constructors.
+      "Option.None", "None"
+      "Option.Some", "Some" ]
+    |> Map.ofList
+
 /// Map a namespace-qualified .NET call to an fss builtin.
 let private resolveValueName (full: string) : string option =
     match full with
@@ -585,6 +637,15 @@ and parsePrimary (p: P) : Expr =
     | Lexer.Ident "Some" ->
         advance p |> ignore
         ESome(parseAtom p)
+    | Lexer.Ident name when Set.contains name preludeModules && (peek2 p).Kind = Lexer.Dot ->
+        let full = parseDottedName p
+        match Map.tryFind full moduleFns with
+        | Some target -> Var target
+        | None ->
+            failwith
+                ("line " + string (peek p).Line + ": '" + full
+                 + "' is not implemented by the fss prelude; see the README for the supported List/Option/String functions")
+
     | Lexer.Ident name ->
         advance p |> ignore
         if isNamespaceRoot name && (peek p).Kind = Lexer.Dot then

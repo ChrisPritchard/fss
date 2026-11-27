@@ -11,18 +11,6 @@ let rec total acc xs =
     | [] -> acc
     | h :: t -> total (acc + h) t
 
-let rec mapF f xs =
-    match xs with
-    | [] -> []
-    | h :: t -> f h :: mapF f t
-
-let rec filterF keep xs =
-    match xs with
-    | [] -> []
-    | h :: t ->
-        let rest = filterF keep t
-        if keep h then h :: rest else rest
-
 let cost item =
     match item with
     | Widget n -> n * 3
@@ -34,14 +22,14 @@ let main _ =
     let gadgets = [4; 5]
     let everything = widgets @ gadgets
 
-    let doubled = mapF (fun x -> x * 2) everything |> total 0
+    let doubled = everything |> List.map (fun x -> x * 2) |> total 0
     System.Console.WriteLine(doubled)
 
-    let evens = filterF (fun x -> x % 2 = 0) everything
-    System.Console.WriteLine(total 0 evens)
+    let evens = everything |> List.filter (fun x -> x % 2 = 0)
+    System.Console.WriteLine(List.fold (fun acc -> fun x -> acc + x) 0 evens)
 
     let items =
-        mapF (fun n -> Widget n) widgets @ mapF (fun n -> Gadget (n, 10)) gadgets
+        List.map (fun n -> Widget n) widgets @ List.map (fun n -> Gadget (n, 10)) gadgets
 
     let mutable bill = 0
     for item in items do

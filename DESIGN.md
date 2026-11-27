@@ -510,7 +510,12 @@ fss build src/*.fs -o app         # multiple files, link them
    (all lowered to existing constructs), local `let rec` and mutual
    `let rec … and …` (closures held in heap cells so they can reference each
    other), and layout-style local bindings with indented bodies.
-10. ~~**C interop**~~ — **done**. `double` is a first-class type;
+10. ~~**Standard library**~~ — **done (v0.3)**: `src/Prelude.fs` is a small
+   `List`/`Option`/`String` library written in fss, parsed and prepended to
+   every program by the driver. The parser rewrites `List.map` &c. to mangled
+   prelude names (`__list_map`), so the library needs no special typing or
+   codegen and is monomorphised per use like user code.
+11. ~~**C interop**~~ — **done**. `double` is a first-class type;
    `extern name(p: t, ...) : ret` declares foreign C functions;
    `#include "h"` / `#include <h>` and `#link "lib"` (or the
    F#-compatible `[<Include("...")>]` / `[<Link("...")>]` attributes) pull in
@@ -519,7 +524,7 @@ fss build src/*.fs -o app         # multiple files, link them
    `cstring` is a raw `char*`, and C function-pointer callbacks are supported.
    `[<Export>]` + `fss build --lib` produces a `.so`/`.dll` plus a generated
    header so C can call into fss.
-11. **Later**: arrays beyond 1-D, `seq`, Map/Set, computation expressions, the
+12. **Later**: arrays beyond 1-D, `seq`, Map/Set, computation expressions, the
    OO subset, wasm target, zero-copy record structs / opaque `ptr` types and
    C-function-pointer callbacks for interop.
 

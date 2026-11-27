@@ -339,6 +339,15 @@ let private continuesLine k =
     | Lt | Le | Gt | Ge | Ne | Assign | Dot | LParen | LBrace | LBracket | Colon -> true
     | _ -> false
 
+/// Tokens that, at the start of a line, continue the previous expression
+/// rather than starting a new element/statement.
+let private startsContinuation k =
+    match k with
+    | PipeRight | PipeLeft | Plus | Minus | Star | Slash | Percent
+    | And | Or | Cons | Append | Caret | Lt | Le | Gt | Ge | Eq | Ne
+    | Assign | Colon | Arrow | Comma -> true
+    | _ -> false
+
 /// Rewrite newlines + indentation into explicit `;`, `in`, and `( )` so the
 /// parser remains whitespace-insensitive. Explicit `;`/`in` (the existing
 /// verbose syntax) is left alone.
@@ -386,6 +395,7 @@ let layout (toks: Token list) : Token list =
 
     let mutable prevLine = -1
     let mutable bracketDepth = 0
+    let bracketKinds = ResizeArray<char>()
     let mutable i = 0
 
     // Statement-start position of the block currently being laid out. A stack
@@ -405,6 +415,18 @@ let layout (toks: Token list) : Token list =
                 st.RemoveAt(st.Count - 1)
                 out.Add(mk RParen t.Line)
             out.Add t
+
+        elif prevLine >= 0 && t.Line > prevLine && bracketDepth > 0 then
+            let top = if bracketKinds.Count > 0 then bracketKinds.[bracketKinds.Count - 1] else 'P'
+            let prev = if out.Count > 0 then out.[out.Count - 1].Kind else EOF
+            if (top = 'L' || top = 'B')
+               && not (continuesLine prev)
+               && not (startsContinuation t.Kind)
+               && t.Kind <> RBracket && t.Kind <> RBrace
+               && t.Kind <> Semi && t.Kind <> In then
+                out.Add(mk Semi t.Line)
+            out.Add t
+            prevLine <- t.Line
 
         elif prevLine >= 0 && t.Line > prevLine && bracketDepth = 0 then
             let cur = st.[st.Count - 1]
@@ -450,10 +472,16 @@ let layout (toks: Token list) : Token list =
             out.Add t
             prevLine <- t.Line
 
-        // Explicit brackets suppress layout inside themselves.
+        // Explicit brackets suppress indentation layout inside themselves, but
+        // newlines still separate list/record elements, e.g. [ a / b ]
+        // or { X = 1 / Y = 2 }, exactly as in F#.
         match t.Kind with
-        | LParen | LBracket | LBrace -> bracketDepth <- bracketDepth + 1
-        | RParen | RBracket | RBrace -> bracketDepth <- bracketDepth - 1
+        | LParen -> bracketDepth <- bracketDepth + 1; bracketKinds.Add 'P'
+        | LBracket -> bracketDepth <- bracketDepth + 1; bracketKinds.Add 'L'
+        | LBrace -> bracketDepth <- bracketDepth + 1; bracketKinds.Add 'B'
+        | RParen | RBracket | RBrace ->
+            bracketDepth <- bracketDepth - 1
+            if bracketKinds.Count > 0 then bracketKinds.RemoveAt(bracketKinds.Count - 1)
         | _ -> ()
 
         i <- i + 1

@@ -28,6 +28,7 @@ Implemented so far (v0.2):
 - `let ... in ...`, `let mutable ... in ...`, `<-`
 - local `let rec` and mutual `let rec ... and ...` (each local function is
   stored in a heap cell so the closures can refer to each other)
+- `List` / `Option` / `String` from a prelude written in fss itself
 - functions with a `unit` parameter: `let f () = ...`, `fun () -> ...`
 - top-level functions as values (`let g = id`, `twice f`), eta-expanded
 - functions: `let f x y = ...`, `let rec f x = ...`, lambdas `fun x -> ...`, application `f x`
@@ -46,7 +47,8 @@ Implemented so far (v0.2):
 - `let main argv = ...` gives `argv : string list` (also `let main () = ...`)
 - `;` sequencing, scope-correct shadowing
 - **significant whitespace**: newline + indentation is accepted as an
-  alternative to `;`/`in`/`( )`, so F#-style layout just works
+  alternative to `;`/`in`/`( )`, so F#-style layout just works; inside brackets
+  a newline also separates list/record elements (`[ a` newline `b ]`)
 - F# attributes (`[<EntryPoint>]`, etc.) are read and ignored
 - `open System` and `.NET`-style names (`System.Console.WriteLine`,
   `System.String`, `Console.WriteLine`, ...) are aliased to fss builtins/types
@@ -63,7 +65,7 @@ Implemented so far (v0.2):
   with a generated header, so C can call fss
 
 Not yet: arrays, range syntax (`for i in 1 .. 10`), full `sprintf`/`printfn`,
-`try/finally`, `raise`, and the `List`/`Seq`/`Option` modules (see
+`try/finally`, `raise`, and the `Seq`/`Array`/`Map`/`Set` modules (see
 `fss scan`). These are the next milestones in `DESIGN.md`.
 
 Top-level mutual recursion is supported: `let rec even n = … and odd n = …`.
@@ -154,6 +156,34 @@ print_int x
   form use `( ... )` for several, or indent a block in the layout form
 - Functions: `let add x y = x + y`, `let rec fact n = if n = 0 then 1 else n * fact (n - 1)`
 - Lambdas: `fun x -> x + 1`; application: `f x y`
+
+## Standard library (prelude)
+
+`src/Prelude.fs` is a small library written **in fss** and prepended to every
+program, so these are ordinary polymorphic top-level functions that the
+compiler monomorphises per use — there is no special-case typing or codegen
+for them:
+
+```fsharp
+people
+|> List.filter (fun p -> p.Age >= 30)
+|> List.map (fun p -> p.Name)
+|> String.concat ", "
+|> println
+```
+
+| module | functions |
+|---|---|
+| `List` | `length`, `isEmpty`, `head`, `tail`, `tryHead`, `exactlyOne`, `map`, `mapi`, `filter`, `fold`, `foldBack`, `iter`, `exists`, `forall`, `contains`, `find`, `tryFind`, `rev`, `append`, `concat`, `choose`, `take`, `truncate`, `skip`, `item`, `tryItem`, `zip`, `unzip`, `distinct` |
+| `Option` | `map`, `bind`, `filter`, `iter`, `defaultValue`, `defaultWith`, `isSome`, `isNone`, `toList`, plus `Option.None`/`Option.Some` |
+| `String` | `length`, `isEmpty`, `concat` |
+
+Anything else in those modules is a compile error naming the function
+(`'List.sort' is not implemented by the fss prelude`), and `fss scan` still
+reports the modules that do not exist at all (`Seq`, `Array`, `Map`, `Set`).
+
+Because the prelude is plain fss, adding a function means adding a `let` to
+`src/Prelude.fs` and one line to the alias table in `src/Parser.fs`.
 
 ## C interop
 

@@ -7,8 +7,8 @@ open Fss.Lexer
 let private unsupportedIdents =
     [ "use"; "yield"; "async"; "task"; "seq"; "printfn"; "printf"; "sprintf"
       "raise"; "assert"; "interface"; "class"; "member"; "inherit"; "abstract"
-      "new"; "override"; "static"; "failwithf"; "Array"; "List"; "Seq"; "Map"
-      "Set"; "Dictionary"; "HashSet"; "Async"; "Task"; "Result"; "option"; "list" ]
+      "new"; "override"; "static"; "failwithf"; "Array"; "Seq"; "Map"; "Set"
+      "Dictionary"; "HashSet"; "Async"; "Task"; "Result" ]
     |> Set.ofList
 
 /// Scan source text and return a list of "<line N>: message" strings describing
